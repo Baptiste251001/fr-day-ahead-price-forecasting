@@ -18,9 +18,11 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import pandas as pd
 import typer
 
-from fr_power.config import DEFAULT_CONFIG_PATH, load_config, load_secrets
+from fr_power.config import DEFAULT_CONFIG_PATH, Config, Secrets, load_config, load_secrets
+from fr_power.data import entsoe, intraday, rte, weather
 
 app = typer.Typer(
     name="fr-power",
@@ -30,6 +32,9 @@ app = typer.Typer(
 
 ConfigOption = typer.Option(
     DEFAULT_CONFIG_PATH, "--config", "-c", help="Path to a YAML config file."
+)
+ForceRefreshOption = typer.Option(
+    False, "--force-refresh", help="Re-fetch even if a local parquet cache already exists."
 )
 
 
@@ -41,16 +46,59 @@ def _setup_logging(level: str) -> None:
 
 
 @app.command()
-def fetch(config: Path = ConfigOption) -> None:
+def fetch(config: Path = ConfigOption, force_refresh: bool = ForceRefreshOption) -> None:
     """Fetch and cache raw data (ENTSO-E, intraday, weather, RTE) to parquet."""
     cfg = load_config(config)
     _setup_logging(cfg.logging.level)
-    load_secrets()
-    typer.echo(
-        f"[stub] fetch: would pull data for {cfg.market.bidding_zone} "
-        f"from {cfg.data.start_date} to {cfg.data.resolved_end_date()}. "
-        "Implemented in Phase 1."
+    secrets = load_secrets()
+    _run_fetch(cfg, secrets, force_refresh=force_refresh)
+
+
+def _run_fetch(cfg: Config, secrets: Secrets, force_refresh: bool) -> None:
+    log = logging.getLogger("fr_power.cli.fetch")
+    start = pd.Timestamp(cfg.data.start_date, tz=cfg.project.timezone)
+    end = pd.Timestamp(cfg.data.resolved_end_date(), tz=cfg.project.timezone)
+    raw_dir = Path(cfg.data.raw_dir)
+
+    try:
+        client = entsoe.build_client(secrets)
+    except RuntimeError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    log.info("Fetching ENTSO-E data for %s from %s to %s.", cfg.market.bidding_zone, start, end)
+    entsoe_results = entsoe.fetch_all(
+        client, start, end, raw_dir, cfg.data.entsoe, force_refresh=force_refresh
     )
+    for name, df in entsoe_results.items():
+        typer.echo(f"  entsoe/{name}: {len(df)} rows, {df.index.min()} -> {df.index.max()}")
+
+    intraday_source = intraday.get_intraday_source(cfg.data.intraday)
+    intraday_df = intraday_source.load()
+    if intraday_df is None:
+        typer.echo(
+            "  intraday: not available -- pipeline will degrade to a "
+            "day-ahead-price forecasting task (see warning above)."
+        )
+    else:
+        typer.echo(f"  intraday: {len(intraday_df)} rows")
+
+    weather_df = weather.fetch_and_cache_weather(
+        cfg.data.weather,
+        raw_dir,
+        str(cfg.data.start_date),
+        str(cfg.data.resolved_end_date()),
+        timezone=cfg.project.timezone,
+        force_refresh=force_refresh,
+    )
+    if weather_df is not None:
+        typer.echo(f"  weather: {len(weather_df)} rows")
+
+    eco2mix_df = rte.fetch_and_cache_eco2mix(
+        cfg.data.rte_eco2mix, secrets, raw_dir, start, end, force_refresh=force_refresh
+    )
+    if eco2mix_df is not None:
+        typer.echo(f"  rte_eco2mix: {len(eco2mix_df)} rows")
 
 
 @app.command()

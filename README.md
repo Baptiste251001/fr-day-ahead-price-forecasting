@@ -106,17 +106,44 @@ degrade to a day-ahead-price forecasting task (see Phase 1).
 
 ## How to run
 
-Each pipeline stage is its own CLI command (all currently stubs; see the
-build plan below for when each is implemented):
+Each pipeline stage is its own CLI command (`fetch` is implemented; the
+rest are stubs -- see the build plan below for when each lands):
 
 ```powershell
-uv run fr-power fetch      --config configs/default.yaml
+uv run fr-power fetch      --config configs/default.yaml   # add --force-refresh to bypass the parquet cache
 uv run fr-power features   --config configs/default.yaml
 uv run fr-power train      --config configs/default.yaml
 uv run fr-power calibrate  --config configs/default.yaml
 uv run fr-power backtest   --config configs/default.yaml
 uv run fr-power report     --config configs/default.yaml
 ```
+
+### Data sources (Phase 1)
+
+`fr-power fetch` pulls and caches (as parquet under `data/raw/`):
+
+- **ENTSO-E Transparency Platform** (via [`entsoe-py`](https://github.com/EnergieID/entsoe-py)),
+  for FR: day-ahead auction prices, day-ahead wind & solar generation
+  forecast, day-ahead load forecast, actual generation by production type
+  (to see nuclear/hydro/thermal shares), and the day-ahead net
+  cross-border position. Requires `ENTSOE_API_TOKEN`.
+- **Intraday prices** via a *pluggable* source
+  (`src/fr_power/data/intraday.py`): drop a CSV/parquet file with an
+  `intraday_price_eur_mwh` column at the path set in
+  `data.intraday.path` and it will be picked up automatically. Granular
+  EPEX ID1/ID3 continuous-trading indices are usually a paid feed and are
+  not bundled here. **With no file present, the pipeline logs a loud
+  warning and degrades gracefully to a day-ahead-price forecasting task**
+  rather than failing -- this is a known, explicitly-flagged limitation,
+  not a silent gap.
+- **Weather** (optional, on by default) via the free
+  [Open-Meteo](https://open-meteo.com/) historical archive API: daily
+  temperature for a population-weighted basket of French cities, combined
+  into national HDD/CDD (France's demand is strongly thermosensitive due
+  to electric heating).
+- **RTE eCO2mix** (optional, off by default): a cross-check/enrichment
+  source from RTE's own Data Portal. Requires `RTE_CLIENT_ID` /
+  `RTE_CLIENT_SECRET` and `data.rte_eco2mix.enabled: true`.
 
 ## Development
 
@@ -135,8 +162,8 @@ and pull request; see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 - [x] **Phase 0 — Scaffolding.** Repo structure, config system, CLI
       skeleton, CI, pre-commit.
-- [ ] **Phase 1 — Data ingestion.** ENTSO-E (DA prices, DA wind/solar/load
-      forecasts, generation by type, cross-border flows), pluggable
+- [x] **Phase 1 — Data ingestion.** ENTSO-E (DA prices, DA wind/solar/load
+      forecasts, generation by type, net cross-border position), pluggable
       intraday source, optional weather (HDD/CDD) and RTE eCO2mix.
 - [ ] **Phase 2 — Feature engineering.** Point-in-time feature matrix,
       documented information timeline, leakage tests.
