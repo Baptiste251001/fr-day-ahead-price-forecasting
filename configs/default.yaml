@@ -75,6 +75,9 @@ backtest:
     n_resamples: 2000
     confidence_level: 0.95
   cost_sensitivity_multipliers: [0.0, 0.5, 1.0, 1.5, 2.0, 3.0]
+  # Which Phase 3 model's forecast supplies directional/magnitude confirmation for
+  # the combined OU + ML strategy (see src/fr_power/backtest/engine.py).
+  signal_model: "lightgbm"
 
 models:
   naive:

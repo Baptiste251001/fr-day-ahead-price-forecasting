@@ -112,6 +112,11 @@ class BacktestConfig(BaseModel):
     max_position_mwh: float = Field(gt=0)
     block_bootstrap: BlockBootstrapConfig
     cost_sensitivity_multipliers: list[float]
+    # Which Phase 3 forecast model's OOS predictions supply the directional/magnitude
+    # confirmation signal (see backtest/engine.py); the others still get backtested for
+    # comparison, but this is the model treated as "the" combined strategy for the
+    # bootstrap CI and cost-sensitivity sweep.
+    signal_model: Literal["naive", "lear", "lightgbm", "lstm"] = "lightgbm"
 
 
 class NaiveModelConfig(BaseModel):

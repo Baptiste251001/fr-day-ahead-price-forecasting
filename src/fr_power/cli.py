@@ -9,9 +9,9 @@ Each pipeline stage is its own subcommand so that a full run is:
     fr-power backtest --config configs/default.yaml
     fr-power report --config configs/default.yaml
 
-`fetch`, `features`, `train` and `calibrate` are implemented; `backtest`
-and `report` are stubs, implemented in the phase that owns them (see
-README build-plan section).
+`fetch`, `features`, `train`, `calibrate` and `backtest` are implemented;
+`report` is a stub, implemented in the phase that owns it (see README
+build-plan section).
 """
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import typer
 
+from fr_power.backtest.engine import perfect_foresight_backtest, run_backtest
+from fr_power.backtest.metrics import block_bootstrap_ci, compute_metrics
 from fr_power.config import DEFAULT_CONFIG_PATH, Config, Secrets, load_config, load_secrets
 from fr_power.data import cache, entsoe, intraday, rte, weather
 from fr_power.features.build import build_feature_matrix
@@ -262,9 +264,13 @@ def _run_train(cfg: Config) -> None:
     dm_df.to_csv(reports_dir / "dm_tests.csv", index=False)
     _plot_rmse_comparison(metrics_df, figures_dir / "forecast_rmse.png")
 
+    predictions_path = Path(cfg.data.processed_dir) / "forecast_predictions.parquet"
+    cache.write_cache(pd.DataFrame(predictions), predictions_path)
+
     typer.echo(f"  saved: {reports_dir / 'forecast_metrics.csv'}")
     typer.echo(f"  saved: {reports_dir / 'dm_tests.csv'}")
     typer.echo(f"  saved: {figures_dir / 'forecast_rmse.png'}")
+    typer.echo(f"  saved: {predictions_path}")
 
 
 def _plot_rmse_comparison(metrics_df: pd.DataFrame, path: Path) -> None:
@@ -364,7 +370,129 @@ def backtest(config: Path = ConfigOption) -> None:
     """Run the walk-forward, cost-aware backtest and save results."""
     cfg = load_config(config)
     _setup_logging(cfg.logging.level)
-    typer.echo("[stub] backtest: would run the walk-forward backtest. Implemented in Phase 5.")
+    _run_backtest(cfg)
+
+
+def _run_backtest(cfg: Config) -> None:
+    processed_dir = Path(cfg.data.processed_dir)
+    matrix_path = processed_dir / "feature_matrix.parquet"
+    meta_path = matrix_path.with_suffix(".meta.json")
+    predictions_path = processed_dir / "forecast_predictions.parquet"
+
+    if not matrix_path.exists() or not meta_path.exists():
+        typer.echo("ERROR: no feature matrix found. Run `fr-power features` first.", err=True)
+        raise typer.Exit(code=1)
+    target_col = json.loads(meta_path.read_text())["target_column"]
+    if target_col != "target_spread_eur_mwh":
+        typer.echo(
+            "Backtest skipped: no intraday-vs-day-ahead spread series is available "
+            "(the target degraded to the day-ahead price level). See `fr-power calibrate` "
+            "for the same limitation.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if not predictions_path.exists():
+        typer.echo("ERROR: no forecast predictions found. Run `fr-power train` first.", err=True)
+        raise typer.Exit(code=1)
+
+    matrix = cache.read_cache(matrix_path)
+    assert matrix is not None
+    predictions_df = cache.read_cache(predictions_path)
+    assert predictions_df is not None
+
+    spread = matrix[target_col]
+    signal_lag = min(cfg.features.spread_lags_hours)
+    signal_ref_col = f"spread_lag_{signal_lag}h"
+    if signal_ref_col not in matrix.columns:
+        typer.echo(
+            f"ERROR: expected lag feature '{signal_ref_col}' not found in feature matrix.", err=True
+        )
+        raise typer.Exit(code=1)
+    signal_reference = matrix[signal_ref_col]
+
+    initial_train_hours = cfg.backtest.walk_forward.initial_train_days * 24
+
+    results: dict[str, pd.DataFrame] = {}
+    for model_name in predictions_df.columns:
+        results[model_name] = run_backtest(
+            spread, signal_reference, predictions_df[model_name], cfg.costs, cfg.backtest, cfg.ou
+        )
+    results["perfect_foresight"] = perfect_foresight_backtest(
+        spread, cfg.costs, cfg.backtest, start_index=initial_train_hours
+    )
+
+    metrics_df = pd.DataFrame(
+        {name: compute_metrics(res).to_dict() for name, res in results.items()}
+    ).T
+    typer.echo(metrics_df.to_string())
+
+    signal_model = cfg.backtest.signal_model
+    if signal_model not in results:
+        typer.echo(
+            f"ERROR: configured backtest.signal_model={signal_model!r} has no predictions "
+            f"in {predictions_path}. Available: {list(predictions_df.columns)}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    bootstrap = block_bootstrap_ci(
+        results[signal_model]["net_pnl_eur"],
+        block_length_hours=cfg.backtest.block_bootstrap.block_length_days * 24,
+        n_resamples=cfg.backtest.block_bootstrap.n_resamples,
+        confidence_level=cfg.backtest.block_bootstrap.confidence_level,
+        seed=cfg.project.random_seed,
+    )
+    typer.echo(f"  bootstrap CI ({signal_model}): {bootstrap}")
+
+    sweep_rows = []
+    for multiplier in cfg.backtest.cost_sensitivity_multipliers:
+        swept = run_backtest(
+            spread,
+            signal_reference,
+            predictions_df[signal_model],
+            cfg.costs,
+            cfg.backtest,
+            cfg.ou,
+            cost_multiplier=multiplier,
+        )
+        row = compute_metrics(swept).to_dict()
+        row["cost_multiplier"] = multiplier
+        sweep_rows.append(row)
+    sweep_df = pd.DataFrame(sweep_rows)
+    typer.echo(sweep_df.to_string(index=False))
+
+    reports_dir = Path("reports")
+    figures_dir = reports_dir / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    metrics_df.to_csv(reports_dir / "backtest_metrics.csv")
+    sweep_df.to_csv(reports_dir / "backtest_cost_sweep.csv", index=False)
+    (reports_dir / "backtest_bootstrap.json").write_text(
+        json.dumps({"signal_model": signal_model, "confidence_intervals": bootstrap}, indent=2)
+    )
+    _plot_cumulative_pnl(results, signal_model, figures_dir / "backtest_cumulative_pnl.png")
+
+    positions_path = processed_dir / "backtest_positions.parquet"
+    cache.write_cache(results[signal_model], positions_path)
+
+    typer.echo(f"  saved: {reports_dir / 'backtest_metrics.csv'}")
+    typer.echo(f"  saved: {reports_dir / 'backtest_cost_sweep.csv'}")
+    typer.echo(f"  saved: {reports_dir / 'backtest_bootstrap.json'}")
+    typer.echo(f"  saved: {figures_dir / 'backtest_cumulative_pnl.png'}")
+    typer.echo(f"  saved: {positions_path}")
+
+
+def _plot_cumulative_pnl(results: dict[str, pd.DataFrame], signal_model: str, path: Path) -> None:
+    matplotlib.use("Agg")
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for name in [signal_model, "naive", "perfect_foresight"]:
+        if name in results:
+            results[name]["net_pnl_eur"].cumsum().plot(ax=ax, label=name)
+    ax.set_ylabel("Cumulative net PnL (EUR)")
+    ax.set_title("Backtest cumulative net PnL")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
 
 
 @app.command()

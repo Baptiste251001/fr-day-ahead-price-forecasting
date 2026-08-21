@@ -106,9 +106,9 @@ degrade to a day-ahead-price forecasting task (see Phase 1).
 
 ## How to run
 
-Each pipeline stage is its own CLI command (`fetch`, `features`, `train`
-and `calibrate` are implemented; the rest are stubs -- see the build plan
-below for when each lands):
+Each pipeline stage is its own CLI command (`fetch`, `features`, `train`,
+`calibrate` and `backtest` are implemented; `report` is a stub -- see the
+build plan below for when it lands):
 
 ```powershell
 uv run fr-power fetch      --config configs/default.yaml   # add --force-refresh to bypass the parquet cache
@@ -263,6 +263,69 @@ Combining this timing signal with the Phase 3 forecast's directional
 edge/magnitude and with cost-aware position sizing is the backtest
 engine's job (Phase 5).
 
+### Backtest engine (Phase 5)
+
+`fr-power backtest` runs the walk-forward, cost-aware backtest that
+combines the OU timing signal (Phase 4) with each Phase 3 model's
+forecast, and reports honest, non-cherry-picked metrics.
+
+**Trade structure.** Given this repository's default data -- a settled
+spread series per hourly product, not a granular intraday tick path
+within one product's trading window (see `fr_power.data.intraday`) --
+each hourly product is a **one-shot** trade: a position is sized once, at
+the D-1 cutoff, and settles automatically against the realized spread.
+This is a deliberate scope decision, not an oversight: it's why
+`backtest/engine.py` reuses the OU z-score and `entry_z_score` from
+Phase 4 for timing/conviction, but not the full `generate_positions`
+state machine (whose entry/exit/holding-period logic is for a
+continuously-tradeable position *within* one product's trading window --
+exactly what it will be for once a granular feed is plugged in).
+
+**Signal combination**, entirely walk-forward and point-in-time safe (OU
+recalibrated per fold on training data only; the "current" deviation from
+`mu` is read off a lagged, already-realized spread feature -- never the
+row's own not-yet-settled target):
+
+- **OU direction**: short the spread if the lagged z-score exceeds
+  `+entry_z_score`, long if below `-entry_z_score`, flat otherwise.
+- **Forecast confirmation**: the trade is skipped unless the forecast's
+  implied edge agrees in sign with the OU direction -- this is "the
+  forecast gives the directional edge" from the original brief, made
+  concrete as a hard gate rather than a vague blend.
+- **Confidence-weighted sizing**: size scales with the forecast edge's
+  magnitude relative to the OU stationary std, capped at
+  `backtest.max_position_mwh`.
+- **Cost-aware no-trade band**: skipped unless the edge clears
+  `backtest.no_trade_band_eur_per_mwh` plus the transaction cost -- a
+  real but tiny edge that costs more to trade than it's worth isn't a
+  trade.
+
+**Metrics** (`backtest/metrics.py`), computed over the *full*
+out-of-sample period including untraded (zero-PnL) hours, not just the
+active subset: gross and net PnL, PnL per MWh, hit rate, **annualized
+Sharpe with correct hourly scaling** (`sqrt(24*365)`, not a daily-return
+`sqrt(252)` copy-paste), max drawdown, and turnover. A **block bootstrap**
+(resampling contiguous chunks of hourly PnL, not individual hours, to
+respect autocorrelation) gives confidence intervals on Sharpe and total
+PnL for the configured `backtest.signal_model`. A **cost-sensitivity
+sweep** re-runs the full engine at each multiplier in
+`backtest.cost_sensitivity_multipliers` -- cost multipliers change *which*
+trades clear the no-trade band, not just the realized cost, so this
+genuinely re-runs the strategy rather than rescaling a fixed PnL curve
+after the fact. Every model is compared against a **perfect-foresight**
+upper bound (full size in the *correct* direction, same cost/band
+economics) so results are read relative to a ceiling, never in isolation.
+
+Results save to `reports/backtest_metrics.csv`,
+`reports/backtest_cost_sweep.csv`, `reports/backtest_bootstrap.json`, and
+`reports/figures/backtest_cumulative_pnl.png`.
+
+`tests/backtest/test_engine.py` tests the sizing/gating formulas exactly
+against hand-picked OU parameters (no estimation noise in the mix) and
+directly verifies point-in-time safety: perturbing a fold's *realized*
+spread changes its settled PnL but never its (already-decided) direction,
+confidence, or size.
+
 ## Development
 
 ```powershell
@@ -288,7 +351,7 @@ and pull request; see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 - [x] **Phase 3 — Forecasting.** Naive, LEAR, LightGBM, LSTM (point +
       quantile), walk-forward evaluation, Diebold-Mariano tests.
 - [x] **Phase 4 — OU spread model and optimal-stopping execution.**
-- [ ] **Phase 5 — Backtest engine.** Walk-forward, costs, sizing, bootstrap
+- [x] **Phase 5 — Backtest engine.** Walk-forward, costs, sizing, bootstrap
       CIs, cost-sensitivity sweep.
 - [ ] **Phase 6 — Analysis and conclusion on the French market.**
 - [ ] **Phase 7 — Polish.** Final README, methodology diagram, results

@@ -261,8 +261,112 @@ def test_calibrate_command_errors_when_features_not_run_yet(tmp_path: Path) -> N
     assert "fr-power features" in result.stdout
 
 
+def test_backtest_command_runs_combined_strategy(tmp_path: Path) -> None:
+    processed_dir = tmp_path / "processed"
+    n = 500
+    index = pd.date_range("2024-01-01", periods=n, freq="h", tz="Europe/Paris")
+    spread = pd.Series(_mean_reverting_series(n, kappa=0.1, mu=2.0, sigma=1.5, seed=0), index=index)
+    spread_lag_24h = spread.shift(24)
+
+    matrix = pd.DataFrame(
+        {"target_spread_eur_mwh": spread, "spread_lag_24h": spread_lag_24h}, index=index
+    )
+    cache.write_cache(matrix, processed_dir / "feature_matrix.parquet")
+    (processed_dir / "feature_matrix.meta.json").write_text(
+        json.dumps({"target_column": "target_spread_eur_mwh"})
+    )
+
+    rng = np.random.default_rng(1)
+    predictions = pd.DataFrame(
+        {"naive": spread_lag_24h, "lightgbm": spread + rng.normal(scale=0.5, size=n)}, index=index
+    )
+    cache.write_cache(predictions, processed_dir / "forecast_predictions.parquet")
+
+    with Path(DEFAULT_CONFIG_PATH).open() as f:
+        config_dict = yaml.safe_load(f)
+    config_dict["data"]["processed_dir"] = str(processed_dir)
+    config_dict["backtest"]["walk_forward"]["initial_train_days"] = 10
+    config_dict["backtest"]["walk_forward"]["retrain_every_days"] = 5
+    config_dict["backtest"]["walk_forward"]["test_window_days"] = 5
+    config_dict["backtest"]["block_bootstrap"]["n_resamples"] = 50
+    config_dict["backtest"]["cost_sensitivity_multipliers"] = [0.0, 1.0]
+    config_dict["backtest"]["signal_model"] = "lightgbm"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump(config_dict))
+
+    original_cwd = Path.cwd()
+    try:
+        os.chdir(tmp_path)
+        result = runner.invoke(app, ["backtest", "--config", str(config_path)])
+    finally:
+        os.chdir(original_cwd)
+
+    assert result.exit_code == 0, result.stdout
+    assert "perfect_foresight" in result.stdout
+    assert (tmp_path / "reports" / "backtest_metrics.csv").exists()
+    assert (tmp_path / "reports" / "backtest_cost_sweep.csv").exists()
+    assert (tmp_path / "reports" / "backtest_bootstrap.json").exists()
+    assert (tmp_path / "reports" / "figures" / "backtest_cumulative_pnl.png").exists()
+    assert (processed_dir / "backtest_positions.parquet").exists()
+
+
+def test_backtest_command_skips_when_target_is_price_level(tmp_path: Path) -> None:
+    processed_dir = tmp_path / "processed"
+    index = pd.date_range("2024-01-01", periods=50, freq="h", tz="Europe/Paris")
+    matrix = pd.DataFrame({"target_day_ahead_price_eur_mwh": np.arange(50.0)}, index=index)
+    cache.write_cache(matrix, processed_dir / "feature_matrix.parquet")
+    (processed_dir / "feature_matrix.meta.json").write_text(
+        json.dumps({"target_column": "target_day_ahead_price_eur_mwh"})
+    )
+
+    with Path(DEFAULT_CONFIG_PATH).open() as f:
+        config_dict = yaml.safe_load(f)
+    config_dict["data"]["processed_dir"] = str(processed_dir)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump(config_dict))
+
+    result = runner.invoke(app, ["backtest", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "skipped" in result.stdout
+
+
+def test_backtest_command_errors_when_train_not_run_yet(tmp_path: Path) -> None:
+    processed_dir = tmp_path / "processed"
+    index = pd.date_range("2024-01-01", periods=50, freq="h", tz="Europe/Paris")
+    matrix = pd.DataFrame({"target_spread_eur_mwh": np.arange(50.0)}, index=index)
+    cache.write_cache(matrix, processed_dir / "feature_matrix.parquet")
+    (processed_dir / "feature_matrix.meta.json").write_text(
+        json.dumps({"target_column": "target_spread_eur_mwh"})
+    )
+
+    with Path(DEFAULT_CONFIG_PATH).open() as f:
+        config_dict = yaml.safe_load(f)
+    config_dict["data"]["processed_dir"] = str(processed_dir)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump(config_dict))
+
+    result = runner.invoke(app, ["backtest", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "fr-power train" in result.stdout
+
+
+def test_backtest_command_errors_when_features_not_run_yet(tmp_path: Path) -> None:
+    with Path(DEFAULT_CONFIG_PATH).open() as f:
+        config_dict = yaml.safe_load(f)
+    config_dict["data"]["processed_dir"] = str(tmp_path / "empty_processed")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump(config_dict))
+
+    result = runner.invoke(app, ["backtest", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "fr-power features" in result.stdout
+
+
 def test_stub_commands_run_without_error() -> None:
-    for command in ["backtest", "report"]:
+    for command in ["report"]:
         result = runner.invoke(app, [command])
         assert result.exit_code == 0
         assert "stub" in result.stdout
