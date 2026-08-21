@@ -9,7 +9,7 @@ Each pipeline stage is its own subcommand so that a full run is:
     fr-power backtest --config configs/default.yaml
     fr-power report --config configs/default.yaml
 
-`fetch` and `features` are implemented; `train`, `calibrate`, `backtest`
+`fetch`, `features` and `train` are implemented; `calibrate`, `backtest`
 and `report` are stubs, implemented in the phase that owns them (see
 README build-plan section).
 """
@@ -18,14 +18,23 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
+import matplotlib
+import matplotlib.pyplot as plt
 import pandas as pd
 import typer
 
 from fr_power.config import DEFAULT_CONFIG_PATH, Config, Secrets, load_config, load_secrets
 from fr_power.data import cache, entsoe, intraday, rte, weather
 from fr_power.features.build import build_feature_matrix
+from fr_power.models.base import Forecaster
+from fr_power.models.benchmarks import LearForecaster, NaivePersistenceForecaster, naive_lag_column
+from fr_power.models.gbm import LightGBMForecaster
+from fr_power.models.lstm import LSTMQuantileForecaster
+from fr_power.models.metrics import diebold_mariano_test, evaluate_predictions
+from fr_power.models.walk_forward import walk_forward_predict
 
 app = typer.Typer(
     name="fr-power",
@@ -164,14 +173,107 @@ def _run_features(cfg: Config) -> None:
     typer.echo(f"  target column: {matrix.attrs['target_column']}")
 
 
+_DM_COMPARISONS = [
+    ("lear", "naive"),
+    ("lightgbm", "naive"),
+    ("lightgbm", "lear"),
+    ("lstm", "naive"),
+    ("lstm", "lear"),
+]
+
+
 @app.command()
 def train(config: Path = ConfigOption) -> None:
     """Train and walk-forward evaluate the forecasting models (naive, LEAR, LightGBM, LSTM)."""
     cfg = load_config(config)
     _setup_logging(cfg.logging.level)
-    typer.echo(
-        "[stub] train: would run walk-forward forecast training and evaluation. Implemented in Phase 3."
+    _run_train(cfg)
+
+
+def _build_model_factories(cfg: Config, target_col: str) -> dict[str, Callable[[], Forecaster]]:
+    naive_lag_col = naive_lag_column(target_col, cfg.models.naive.lag_hours)
+    seed = cfg.project.random_seed
+    return {
+        "naive": lambda: NaivePersistenceForecaster(naive_lag_col),
+        "lear": lambda: LearForecaster(
+            cfg.models.lear.lasso_alpha_grid, cfg.models.lear.cv_folds, random_seed=seed
+        ),
+        "lightgbm": lambda: LightGBMForecaster(
+            **cfg.models.lightgbm.model_dump(), random_seed=seed
+        ),
+        "lstm": lambda: LSTMQuantileForecaster(**cfg.models.lstm.model_dump(), random_seed=seed),
+    }
+
+
+def _run_train(cfg: Config) -> None:
+    processed_path = Path(cfg.data.processed_dir) / "feature_matrix.parquet"
+    meta_path = processed_path.with_suffix(".meta.json")
+    if not processed_path.exists() or not meta_path.exists():
+        typer.echo("ERROR: no feature matrix found. Run `fr-power features` first.", err=True)
+        raise typer.Exit(code=1)
+
+    matrix = cache.read_cache(processed_path)
+    assert matrix is not None
+    target_col = json.loads(meta_path.read_text())["target_column"]
+    feature_cols = [c for c in matrix.columns if not c.startswith("target_")]
+
+    wf = cfg.backtest.walk_forward
+    predictions = walk_forward_predict(
+        matrix,
+        feature_cols,
+        target_col,
+        _build_model_factories(cfg, target_col),
+        initial_train_hours=wf.initial_train_days * 24,
+        retrain_every_hours=wf.retrain_every_days * 24,
+        test_window_hours=wf.test_window_days * 24,
     )
+
+    actual = matrix[target_col]
+    metrics_df = pd.DataFrame(
+        {name: evaluate_predictions(actual, preds) for name, preds in predictions.items()}
+    ).T
+    typer.echo(metrics_df.to_string())
+
+    dm_rows = []
+    for challenger, baseline in _DM_COMPARISONS:
+        if challenger not in predictions or baseline not in predictions:
+            continue
+        errors_challenger = actual - predictions[challenger]
+        errors_baseline = actual - predictions[baseline]
+        aligned = pd.concat(
+            [errors_challenger.rename("c"), errors_baseline.rename("b")], axis=1
+        ).dropna()
+        if len(aligned) < 2:
+            continue
+        dm_stat, p_value = diebold_mariano_test(aligned["c"], aligned["b"])
+        dm_rows.append(
+            {"challenger": challenger, "baseline": baseline, "dm_stat": dm_stat, "p_value": p_value}
+        )
+    dm_df = pd.DataFrame(dm_rows)
+    if not dm_df.empty:
+        typer.echo(dm_df.to_string(index=False))
+
+    reports_dir = Path("reports")
+    figures_dir = reports_dir / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    metrics_df.to_csv(reports_dir / "forecast_metrics.csv")
+    dm_df.to_csv(reports_dir / "dm_tests.csv", index=False)
+    _plot_rmse_comparison(metrics_df, figures_dir / "forecast_rmse.png")
+
+    typer.echo(f"  saved: {reports_dir / 'forecast_metrics.csv'}")
+    typer.echo(f"  saved: {reports_dir / 'dm_tests.csv'}")
+    typer.echo(f"  saved: {figures_dir / 'forecast_rmse.png'}")
+
+
+def _plot_rmse_comparison(metrics_df: pd.DataFrame, path: Path) -> None:
+    matplotlib.use("Agg")
+    fig, ax = plt.subplots(figsize=(6, 4))
+    metrics_df["rmse"].plot.bar(ax=ax)
+    ax.set_ylabel("RMSE")
+    ax.set_title("Out-of-sample forecast RMSE by model")
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
 
 
 @app.command()

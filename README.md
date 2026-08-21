@@ -106,9 +106,9 @@ degrade to a day-ahead-price forecasting task (see Phase 1).
 
 ## How to run
 
-Each pipeline stage is its own CLI command (`fetch` and `features` are
-implemented; the rest are stubs -- see the build plan below for when each
-lands):
+Each pipeline stage is its own CLI command (`fetch`, `features` and
+`train` are implemented; the rest are stubs -- see the build plan below
+for when each lands):
 
 ```powershell
 uv run fr-power fetch      --config configs/default.yaml   # add --force-refresh to bypass the parquet cache
@@ -177,6 +177,44 @@ CET/CEST D-1 decision point:
 traceable integer position) to directly verify each lag/rolling feature
 only ever pulls from strictly earlier delivery hours.
 
+### Forecasting suite (Phase 3)
+
+`fr-power train` reads the cached feature matrix and walk-forward
+evaluates four models, in increasing order of sophistication -- each is
+meant to beat the previous one, not just add complexity for its own sake:
+
+1. **Naive persistence** (`models/benchmarks.py`): predicts the value
+   observed exactly `models.naive.lag_hours` (default 168h, i.e. same
+   hour last week) earlier, reading a pre-built lag feature column.
+2. **LEAR** (`models/benchmarks.py`): a standardized Lasso regression,
+   alpha selected by time-ordered cross-validation (`TimeSeriesSplit`,
+   never a random/shuffled split). The classic hard-to-beat EPF benchmark.
+3. **LightGBM** (`models/gbm.py`): gradient-boosted trees, with early
+   stopping on a trailing chronological validation slice (never random).
+4. **LSTM** (`models/lstm.py`): a sequence model trained with **pinball
+   (quantile) loss** across `models.lstm.quantiles`, so it produces a full
+   predictive distribution, not just a point forecast; the median quantile
+   doubles as the point prediction. Early stopping again uses a trailing
+   chronological slice.
+
+All four share one interface (`fit(X, y)` / `predict(X)`, see
+`models/base.py`) and are run through a single generic **expanding-window
+walk-forward harness** (`models/walk_forward.py`, reusing the
+`backtest.walk_forward` config block): starting from
+`initial_train_days`, each model is retrained every `retrain_every_days`
+and evaluated on the next `test_window_days` -- never a single train/test
+split.
+
+Evaluation reports RMSE/MAE/MdAE per model (`models/metrics.py`) plus
+pairwise **Diebold-Mariano tests** (LEAR vs naive, LightGBM vs naive/LEAR,
+LSTM vs naive/LEAR) so "is the fancier model actually better, or just
+different" gets a statistical answer rather than a vibe. Results are
+saved to `reports/forecast_metrics.csv`, `reports/dm_tests.csv`, and
+`reports/figures/forecast_rmse.png`. If LSTM does not beat LEAR, that
+will show up directly in this table -- see
+[Limitations and realism](#limitations-and-realism) once real data is run
+through the pipeline.
+
 ## Development
 
 ```powershell
@@ -199,7 +237,7 @@ and pull request; see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
       intraday source, optional weather (HDD/CDD) and RTE eCO2mix.
 - [x] **Phase 2 — Feature engineering.** Point-in-time feature matrix,
       documented information timeline, leakage tests.
-- [ ] **Phase 3 — Forecasting.** Naive, LEAR, LightGBM, LSTM (point +
+- [x] **Phase 3 — Forecasting.** Naive, LEAR, LightGBM, LSTM (point +
       quantile), walk-forward evaluation, Diebold-Mariano tests.
 - [ ] **Phase 4 — OU spread model and optimal-stopping execution.**
 - [ ] **Phase 5 — Backtest engine.** Walk-forward, costs, sizing, bootstrap

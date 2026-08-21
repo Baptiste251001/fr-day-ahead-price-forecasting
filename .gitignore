@@ -37,6 +37,7 @@ reference/*.pdf
 # --- Reports (generated artifacts, regenerate via pipeline) ---
 reports/figures/*
 !reports/figures/.gitkeep
+reports/*.csv
 
 # --- Testing / linting / typing caches ---
 .pytest_cache/

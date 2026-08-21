@@ -1,5 +1,7 @@
 """Smoke tests for the CLI skeleton."""
 
+import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -109,8 +111,80 @@ def test_features_command_errors_when_fetch_not_run_yet(tmp_path: Path) -> None:
     assert "fr-power fetch" in result.stdout
 
 
+def test_train_command_runs_full_forecast_suite(tmp_path: Path) -> None:
+    processed_dir = tmp_path / "processed"
+    n = 300
+    index = pd.date_range("2024-01-01", periods=n, freq="h", tz="Europe/Paris")
+    rng = np.random.default_rng(0)
+    target = 50.0 + 5.0 * np.sin(np.arange(n) / 24 * 2 * np.pi) + rng.normal(scale=1.0, size=n)
+    matrix = pd.DataFrame(
+        {
+            "target_day_ahead_price_eur_mwh": target,
+            "day_ahead_price_lag_24h": pd.Series(target, index=index).shift(24),
+            "x1": rng.normal(size=n),
+            "x2": rng.normal(size=n),
+        },
+        index=index,
+    )
+    cache.write_cache(matrix, processed_dir / "feature_matrix.parquet")
+    (processed_dir / "feature_matrix.meta.json").write_text(
+        json.dumps({"target_column": "target_day_ahead_price_eur_mwh"})
+    )
+
+    with Path(DEFAULT_CONFIG_PATH).open() as f:
+        config_dict = yaml.safe_load(f)
+    config_dict["data"]["processed_dir"] = str(processed_dir)
+    config_dict["models"]["naive"]["lag_hours"] = 24
+    config_dict["models"]["lear"]["lasso_alpha_grid"] = [0.01, 0.1, 1.0]
+    config_dict["models"]["lear"]["cv_folds"] = 2
+    config_dict["models"]["lightgbm"]["n_estimators"] = 20
+    config_dict["models"]["lightgbm"]["num_leaves"] = 7
+    config_dict["models"]["lightgbm"]["min_child_samples"] = 2
+    config_dict["models"]["lightgbm"]["early_stopping_rounds"] = 3
+    config_dict["models"]["lstm"]["sequence_length_hours"] = 4
+    config_dict["models"]["lstm"]["hidden_size"] = 4
+    config_dict["models"]["lstm"]["num_layers"] = 1
+    config_dict["models"]["lstm"]["batch_size"] = 8
+    config_dict["models"]["lstm"]["max_epochs"] = 2
+    config_dict["models"]["lstm"]["early_stopping_patience"] = 1
+    config_dict["models"]["lstm"]["quantiles"] = [0.1, 0.5, 0.9]
+    config_dict["backtest"]["walk_forward"]["initial_train_days"] = 3
+    config_dict["backtest"]["walk_forward"]["retrain_every_days"] = 2
+    config_dict["backtest"]["walk_forward"]["test_window_days"] = 2
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump(config_dict))
+
+    # cwd-relative "reports/" output -- isolate the test from the real repo's reports/ dir.
+    original_cwd = Path.cwd()
+    try:
+        os.chdir(tmp_path)
+        result = runner.invoke(app, ["train", "--config", str(config_path)])
+    finally:
+        os.chdir(original_cwd)
+
+    assert result.exit_code == 0
+    for model_name in ["naive", "lear", "lightgbm", "lstm"]:
+        assert model_name in result.stdout
+    assert (tmp_path / "reports" / "forecast_metrics.csv").exists()
+    assert (tmp_path / "reports" / "dm_tests.csv").exists()
+    assert (tmp_path / "reports" / "figures" / "forecast_rmse.png").exists()
+
+
+def test_train_command_errors_when_features_not_run_yet(tmp_path: Path) -> None:
+    with Path(DEFAULT_CONFIG_PATH).open() as f:
+        config_dict = yaml.safe_load(f)
+    config_dict["data"]["processed_dir"] = str(tmp_path / "empty_processed")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump(config_dict))
+
+    result = runner.invoke(app, ["train", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "fr-power features" in result.stdout
+
+
 def test_stub_commands_run_without_error() -> None:
-    for command in ["train", "calibrate", "backtest", "report"]:
+    for command in ["calibrate", "backtest", "report"]:
         result = runner.invoke(app, [command])
         assert result.exit_code == 0
         assert "stub" in result.stdout

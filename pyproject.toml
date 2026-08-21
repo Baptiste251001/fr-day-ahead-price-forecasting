@@ -62,7 +62,11 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "N"]
-ignore = ["E501"]
+# E501: line length is handled by ruff format.
+# N803/N806: `X`/`X_train`/etc. is the standard scikit-learn convention for a
+# feature matrix and is used throughout fr_power.models -- renaming it to
+# lowercase would fight established ML convention rather than improve clarity.
+ignore = ["E501", "N803", "N806"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["fr_power"]
