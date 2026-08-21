@@ -60,10 +60,10 @@ def _configs(
 # ---------------------------------------------------------------------------
 
 
-def test_direction_from_z_score_threshold() -> None:
-    index = _index(5)
-    reference = pd.Series([2.0, 4.0, 0.0, 2.9, 2.0], index=index)  # mu=2, std=1 -> z=[0,2,-2,0.9,0]
-    predictions = reference
+def test_conviction_gate_blocks_trades_when_z_below_entry_threshold() -> None:
+    index = _index(3)
+    reference = pd.Series([2.0, 2.5, 2.0], index=index)  # mu=2, std=1 -> z=[0, 0.5, 0]
+    predictions = pd.Series([10.0, 10.0, 10.0], index=index)  # strong forecast, but ungated
 
     signal = compute_fold_signal(
         reference,
@@ -76,14 +76,56 @@ def test_direction_from_z_score_threshold() -> None:
         max_position_mwh=1.0,
     )
 
-    assert signal["z_score"].tolist() == pytest.approx([0.0, 2.0, -2.0, 0.9, 0.0])
-    assert signal["direction"].tolist() == [0.0, -1.0, 1.0, 0.0, 0.0]
+    assert (signal["direction"] == 0.0).all()
+    assert (signal["size_mwh"] == 0.0).all()
 
 
-def test_disagreeing_forecast_gates_trade_to_zero() -> None:
+def test_direction_follows_forecast_sign_when_conviction_present() -> None:
+    index = _index(2)
+    reference = pd.Series([4.0, 0.0], index=index)  # z=[2.0, -2.0] -> conviction on both
+    predictions = pd.Series([5.0, -3.0], index=index)
+
+    signal = compute_fold_signal(
+        reference,
+        predictions,
+        mu=2.0,
+        stationary_std=1.0,
+        entry_z=1.0,
+        no_trade_band_eur_per_mwh=0.0,
+        cost_per_mwh=0.0,
+        max_position_mwh=1.0,
+    )
+
+    assert signal["direction"].tolist() == [1.0, -1.0]
+
+
+def test_confidence_scales_with_forecast_magnitude() -> None:
     index = _index(1)
-    reference = pd.Series([4.0], index=index)  # z=2.0 -> direction=-1 (expect a fall)
-    predictions = pd.Series([5.0], index=index)  # forecast_edge=+1.0 -> predicts a rise: disagrees
+    reference = pd.Series([4.0], index=index)  # z=2.0 -> conviction True
+    predictions = pd.Series([0.5], index=index)
+
+    signal = compute_fold_signal(
+        reference,
+        predictions,
+        mu=2.0,
+        stationary_std=1.0,
+        entry_z=1.0,
+        no_trade_band_eur_per_mwh=0.0,
+        cost_per_mwh=0.0,
+        max_position_mwh=2.0,
+    )
+
+    assert signal["direction"].iloc[0] == 1.0
+    assert signal["confidence"].iloc[0] == pytest.approx(0.5)  # |0.5| / stationary_std(1.0)
+    assert signal["size_mwh"].iloc[0] == pytest.approx(
+        1.0
+    )  # direction(1) * max(2.0) * confidence(0.5)
+
+
+def test_confidence_capped_at_one() -> None:
+    index = _index(1)
+    reference = pd.Series([4.0], index=index)  # conviction True
+    predictions = pd.Series([-10.0], index=index)
 
     signal = compute_fold_signal(
         reference,
@@ -97,56 +139,14 @@ def test_disagreeing_forecast_gates_trade_to_zero() -> None:
     )
 
     assert signal["direction"].iloc[0] == -1.0
-    assert signal["confidence"].iloc[0] == 0.0
-    assert signal["size_mwh"].iloc[0] == 0.0
-
-
-def test_agreeing_forecast_sizes_by_confidence() -> None:
-    index = _index(1)
-    reference = pd.Series([4.0], index=index)  # z=2.0 -> direction=-1
-    predictions = pd.Series([3.5], index=index)  # forecast_edge=-0.5 -> agrees
-
-    signal = compute_fold_signal(
-        reference,
-        predictions,
-        mu=2.0,
-        stationary_std=1.0,
-        entry_z=1.0,
-        no_trade_band_eur_per_mwh=0.0,
-        cost_per_mwh=0.0,
-        max_position_mwh=2.0,
-    )
-
-    assert signal["confidence"].iloc[0] == pytest.approx(0.5)
-    assert signal["size_mwh"].iloc[0] == pytest.approx(
-        -1.0
-    )  # direction(-1) * max(2.0) * confidence(0.5)
-
-
-def test_confidence_capped_at_one() -> None:
-    index = _index(1)
-    reference = pd.Series([4.0], index=index)
-    predictions = pd.Series([-10.0], index=index)  # huge agreeing edge
-
-    signal = compute_fold_signal(
-        reference,
-        predictions,
-        mu=2.0,
-        stationary_std=1.0,
-        entry_z=1.0,
-        no_trade_band_eur_per_mwh=0.0,
-        cost_per_mwh=0.0,
-        max_position_mwh=1.0,
-    )
-
     assert signal["confidence"].iloc[0] == 1.0
     assert signal["size_mwh"].iloc[0] == -1.0
 
 
-def test_no_trade_band_gates_small_edges() -> None:
+def test_no_trade_band_gates_small_forecast_levels() -> None:
     index = _index(1)
-    reference = pd.Series([4.0], index=index)  # direction=-1
-    predictions = pd.Series([3.85], index=index)  # forecast_edge=-0.15, agrees but small
+    reference = pd.Series([4.0], index=index)  # conviction True (z=2.0)
+    predictions = pd.Series([0.15], index=index)
 
     gated = compute_fold_signal(
         reference,
@@ -173,10 +173,10 @@ def test_no_trade_band_gates_small_edges() -> None:
     assert not_gated["size_mwh"].iloc[0] != 0.0
 
 
-def test_higher_cost_gates_a_previously_tradeable_edge() -> None:
+def test_higher_cost_gates_a_previously_tradeable_forecast() -> None:
     index = _index(1)
-    reference = pd.Series([4.0], index=index)
-    predictions = pd.Series([3.7], index=index)  # forecast_edge=-0.3
+    reference = pd.Series([4.0], index=index)  # conviction True
+    predictions = pd.Series([0.3], index=index)
 
     cheap = compute_fold_signal(
         reference,

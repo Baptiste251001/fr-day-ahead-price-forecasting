@@ -326,6 +326,36 @@ directly verifies point-in-time safety: perturbing a fold's *realized*
 spread changes its settled PnL but never its (already-decided) direction,
 confidence, or size.
 
+### Analysis and conclusions (Phase 6)
+
+**[`reports/conclusions.md`](reports/conclusions.md) is the core written
+deliverable** -- read that first. It answers the brief's questions (does
+the strategy survive costs, which features matter most, how do French and
+Danish market dynamics differ and what that implies for spread
+predictability, a 2021-2022 energy-crisis regime split) and consolidates
+every data/modelling limitation documented across the codebase into one
+place.
+
+No live ENTSO-E API token was configured during this build, so no real
+FR market data has been pulled. Rather than leave Phase 6 as an inert
+template, `src/fr_power/demo/synthetic.py` generates a synthetic,
+illustrative FR-like dataset (a genuinely OU-distributed spread with a
+regime shift, nuclear maintenance dips, thermosensitive load, seasonal
+wind/solar, occasional negative prices) so the full pipeline --
+feature building, walk-forward forecasting, OU calibration, the
+backtest -- runs end-to-end and produces real (if synthetic-data) output.
+The three notebooks under [`notebooks/`](notebooks/) exercise this
+end-to-end and are executed, not just written (their output cells are
+real): `01_data_exploration.ipynb`, `02_forecast_eval.ipynb`,
+`03_ou_and_backtest.ipynb`. Every synthetic figure is clearly labeled as
+such, both in the notebooks and in `conclusions.md` -- the qualitative
+French-vs-Danish market discussion there is the genuine analytical
+content and does not depend on this synthetic data at all.
+
+Running the same notebooks against real data only requires swapping the
+`generate_synthetic_market_data` call for `fr_power.data.cache.read_cache`
+against `data/raw/`/`data/processed/`; none of the analysis code differs.
+
 ## Development
 
 ```powershell
@@ -353,7 +383,7 @@ and pull request; see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 - [x] **Phase 4 — OU spread model and optimal-stopping execution.**
 - [x] **Phase 5 — Backtest engine.** Walk-forward, costs, sizing, bootstrap
       CIs, cost-sensitivity sweep.
-- [ ] **Phase 6 — Analysis and conclusion on the French market.**
+- [x] **Phase 6 — Analysis and conclusion on the French market.**
 - [ ] **Phase 7 — Polish.** Final README, methodology diagram, results
       table, limitations section.
 

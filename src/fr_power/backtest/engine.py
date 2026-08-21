@@ -39,20 +39,26 @@ point-in-time-safe, walk-forward out-of-sample prediction (see
 
 Signal combination
 -------------------
-  * OU direction: -1 (short the spread, expect it to fall) if the lagged
-    z-score exceeds +entry_z_score; +1 (long) if it is below
-    -entry_z_score; 0 (no OU conviction) otherwise.
-  * Forecast confirmation: the forecast's implied edge (predicted spread
-    minus the same lagged reference point) must agree in sign with the OU
-    direction, or the trade is skipped entirely -- this is the "forecast
-    gives the directional edge" half of the combination.
-  * Confidence-weighted sizing: position size scales with the forecast
-    edge's magnitude relative to the OU process's stationary std, capped
-    at `backtest.max_position_mwh`.
-  * Cost-aware no-trade band: a trade is skipped unless the forecast
-    edge's magnitude clears `backtest.no_trade_band_eur_per_mwh` *plus*
-    the round-trip-equivalent transaction cost -- a small, real edge that
-    costs more to trade than it's worth is not a trade.
+  * OU conviction gate (timing): a trade is only considered when the
+    lagged z-score's magnitude reaches `entry_z_score` -- the current
+    deviation from the OU mean is unusually large, i.e. a genuine
+    regime/statistical opportunity. This gate does *not* set direction.
+  * Forecast direction and magnitude: direction is the *sign of the
+    forecast's predicted absolute spread level*, and confidence scales
+    with that forecast's magnitude relative to the OU stationary std,
+    capped at `backtest.max_position_mwh`. PnL settles as
+    `size * spread(t)`, an absolute-level payoff -- direction must
+    therefore track the predicted *level*, not reversion-toward-`mu`,
+    which only implies the right sign when `mu` happens to be near zero.
+    (An earlier version of this module set direction from OU
+    reversion-toward-`mu` directly; it lost money by construction
+    whenever `mu != 0`, which the spread's plausible persistent bias
+    makes the normal case, not the exception -- see
+    `reports/conclusions.md`.)
+  * Cost-aware no-trade band: a trade is skipped unless the forecast's
+    magnitude clears `backtest.no_trade_band_eur_per_mwh` *plus* the
+    transaction cost -- a small, real edge that costs more to trade than
+    it's worth is not a trade.
 """
 
 from __future__ import annotations
@@ -91,6 +97,21 @@ def compute_fold_signal(
 ) -> pd.DataFrame:
     """Pure signal computation for one fold, given already-calibrated OU parameters.
 
+    Direction and sizing are driven by the *forecast's* predicted absolute spread
+    level, not by OU reversion-toward-`mu`: PnL settles as `size * spread(t)`, an
+    absolute-level payoff, and reversion-toward-`mu` only implies the right sign of
+    that payoff when `mu` is (near) zero. The intraday-vs-day-ahead spread plausibly
+    carries a persistent, non-zero long-run bias (a structural risk premium, and
+    certainly non-zero in this repo's synthetic demo data -- see
+    `fr_power.demo.synthetic`), so an earlier version of this function set direction
+    from the OU z-score's sign directly and lost money by construction: it was
+    betting against a quantity with positive expectation, regardless of how
+    "reverted" the timing looked relative to `mu`. The z-score's proper role is a
+    conviction/timing gate -- only trade when the current deviation from `mu` is
+    unusually large, i.e. a genuine regime/statistical opportunity -- matching "the
+    forecast gives the directional edge... the OU layer gives timing" from this
+    project's brief.
+
     Kept separate from OU estimation (and from `run_backtest`'s walk-forward
     loop) so the sizing/gating rules can be tested exactly against
     hand-picked parameters, without OLS/MLE estimation noise in the mix.
@@ -98,18 +119,17 @@ def compute_fold_signal(
     forecast_edge, direction, confidence, size_mwh.
     """
     z = (reference - mu) / stationary_std
-    forecast_edge = predictions.reindex(reference.index) - reference
+    forecast = predictions.reindex(reference.index)
+    forecast_edge = forecast - reference
 
-    direction = pd.Series(0.0, index=reference.index)
-    direction[z > entry_z] = -1.0
-    direction[z < -entry_z] = 1.0
+    ou_conviction = z.abs() >= entry_z
+    direction = np.sign(forecast).where(ou_conviction, 0.0)
 
-    agrees = np.sign(forecast_edge) == direction
-    confidence = (forecast_edge.abs() / stationary_std).clip(upper=1.0)
-    confidence = confidence.where(agrees & (direction != 0), 0.0)
+    confidence = (forecast.abs() / stationary_std).clip(upper=1.0)
+    confidence = confidence.where(ou_conviction & (direction != 0), 0.0)
 
     min_edge = no_trade_band_eur_per_mwh + cost_per_mwh
-    confidence = confidence.where(forecast_edge.abs() >= min_edge, 0.0)
+    confidence = confidence.where(forecast.abs() >= min_edge, 0.0)
 
     size = (direction * max_position_mwh * confidence).clip(
         lower=-max_position_mwh, upper=max_position_mwh
