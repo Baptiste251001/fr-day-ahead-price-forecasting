@@ -183,8 +183,86 @@ def test_train_command_errors_when_features_not_run_yet(tmp_path: Path) -> None:
     assert "fr-power features" in result.stdout
 
 
+def _mean_reverting_series(n: int, kappa: float, mu: float, sigma: float, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    a = np.exp(-kappa)
+    std_eps = sigma * np.sqrt((1 - a**2) / (2 * kappa))
+    x = np.empty(n)
+    x[0] = mu
+    for t in range(1, n):
+        x[t] = mu + a * (x[t - 1] - mu) + std_eps * rng.standard_normal()
+    return x
+
+
+def test_calibrate_command_runs_ou_calibration(tmp_path: Path) -> None:
+    processed_dir = tmp_path / "processed"
+    n = 500
+    index = pd.date_range("2024-01-01", periods=n, freq="h", tz="Europe/Paris")
+    spread = _mean_reverting_series(n, kappa=0.1, mu=2.0, sigma=1.5, seed=0)
+    matrix = pd.DataFrame({"target_spread_eur_mwh": spread}, index=index)
+    cache.write_cache(matrix, processed_dir / "feature_matrix.parquet")
+    (processed_dir / "feature_matrix.meta.json").write_text(
+        json.dumps({"target_column": "target_spread_eur_mwh"})
+    )
+
+    with Path(DEFAULT_CONFIG_PATH).open() as f:
+        config_dict = yaml.safe_load(f)
+    config_dict["data"]["processed_dir"] = str(processed_dir)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump(config_dict))
+
+    original_cwd = Path.cwd()
+    try:
+        os.chdir(tmp_path)
+        result = runner.invoke(app, ["calibrate", "--config", str(config_path)])
+    finally:
+        os.chdir(original_cwd)
+
+    assert result.exit_code == 0
+    assert "half-life" in result.stdout
+    assert (tmp_path / "reports" / "ou_calibration.json").exists()
+    assert (processed_dir / "ou_positions.parquet").exists()
+
+    summary = json.loads((tmp_path / "reports" / "ou_calibration.json").read_text())
+    assert summary["mu"] == pytest.approx(2.0, abs=0.5)
+
+
+def test_calibrate_command_skips_when_target_is_price_level(tmp_path: Path) -> None:
+    processed_dir = tmp_path / "processed"
+    index = pd.date_range("2024-01-01", periods=50, freq="h", tz="Europe/Paris")
+    matrix = pd.DataFrame({"target_day_ahead_price_eur_mwh": np.arange(50.0)}, index=index)
+    cache.write_cache(matrix, processed_dir / "feature_matrix.parquet")
+    (processed_dir / "feature_matrix.meta.json").write_text(
+        json.dumps({"target_column": "target_day_ahead_price_eur_mwh"})
+    )
+
+    with Path(DEFAULT_CONFIG_PATH).open() as f:
+        config_dict = yaml.safe_load(f)
+    config_dict["data"]["processed_dir"] = str(processed_dir)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump(config_dict))
+
+    result = runner.invoke(app, ["calibrate", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "skipped" in result.stdout
+
+
+def test_calibrate_command_errors_when_features_not_run_yet(tmp_path: Path) -> None:
+    with Path(DEFAULT_CONFIG_PATH).open() as f:
+        config_dict = yaml.safe_load(f)
+    config_dict["data"]["processed_dir"] = str(tmp_path / "empty_processed")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump(config_dict))
+
+    result = runner.invoke(app, ["calibrate", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "fr-power features" in result.stdout
+
+
 def test_stub_commands_run_without_error() -> None:
-    for command in ["calibrate", "backtest", "report"]:
+    for command in ["backtest", "report"]:
         result = runner.invoke(app, [command])
         assert result.exit_code == 0
         assert "stub" in result.stdout

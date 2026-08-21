@@ -14,7 +14,7 @@ from typing import Literal
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "default.yaml"
 
@@ -172,6 +172,16 @@ class OuOptimalStoppingConfig(BaseModel):
     exit_z_score: float = Field(ge=0)
     no_trade_z_score: float = Field(ge=0)
     max_holding_hours: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def thresholds_are_ordered(self) -> OuOptimalStoppingConfig:
+        if not (self.no_trade_z_score <= self.exit_z_score <= self.entry_z_score):
+            raise ValueError(
+                "OU optimal-stopping thresholds must satisfy "
+                "no_trade_z_score <= exit_z_score <= entry_z_score, got "
+                f"{self.no_trade_z_score} <= {self.exit_z_score} <= {self.entry_z_score}"
+            )
+        return self
 
 
 class OuConfig(BaseModel):

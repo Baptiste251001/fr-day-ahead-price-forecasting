@@ -128,9 +128,11 @@ ou:
     method: "ols"  # "ols" or "mle"
     min_observations: 20
   optimal_stopping:
-    entry_z_score: 1.0     # deviation from mu, in units of stationary std, to enter
-    exit_z_score: 0.1      # deviation from mu, in units of stationary std, to exit
-    no_trade_z_score: 0.3  # below this deviation, never trade
+    # Three-tier hysteresis band, ordered no_trade_z <= exit_z <= entry_z; see
+    # src/fr_power/ou/optimal_stopping.py module docstring for the full rationale.
+    no_trade_z_score: 0.1   # |z| below this: dead zone, never open; force-close if open
+    exit_z_score: 0.3       # an open position is closed once |z| reverts into this band
+    entry_z_score: 1.0      # a flat position is opened once |z| reaches this band
     max_holding_hours: 6
 
 logging:

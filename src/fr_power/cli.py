@@ -9,7 +9,7 @@ Each pipeline stage is its own subcommand so that a full run is:
     fr-power backtest --config configs/default.yaml
     fr-power report --config configs/default.yaml
 
-`fetch`, `features` and `train` are implemented; `calibrate`, `backtest`
+`fetch`, `features`, `train` and `calibrate` are implemented; `backtest`
 and `report` are stubs, implemented in the phase that owns them (see
 README build-plan section).
 """
@@ -35,6 +35,8 @@ from fr_power.models.gbm import LightGBMForecaster
 from fr_power.models.lstm import LSTMQuantileForecaster
 from fr_power.models.metrics import diebold_mariano_test, evaluate_predictions
 from fr_power.models.walk_forward import walk_forward_predict
+from fr_power.ou.estimate import compute_z_score, estimate_ou
+from fr_power.ou.optimal_stopping import generate_positions, thresholds_from_config
 
 app = typer.Typer(
     name="fr-power",
@@ -281,9 +283,80 @@ def calibrate(config: Path = ConfigOption) -> None:
     """Calibrate the OU spread model and derive optimal-stopping execution thresholds."""
     cfg = load_config(config)
     _setup_logging(cfg.logging.level)
-    typer.echo(
-        "[stub] calibrate: would fit OU parameters and stopping thresholds. Implemented in Phase 4."
+    _run_calibrate(cfg)
+
+
+def _run_calibrate(cfg: Config) -> None:
+    processed_path = Path(cfg.data.processed_dir) / "feature_matrix.parquet"
+    meta_path = processed_path.with_suffix(".meta.json")
+    if not processed_path.exists() or not meta_path.exists():
+        typer.echo("ERROR: no feature matrix found. Run `fr-power features` first.", err=True)
+        raise typer.Exit(code=1)
+
+    matrix = cache.read_cache(processed_path)
+    assert matrix is not None
+    target_col = json.loads(meta_path.read_text())["target_column"]
+
+    if target_col != "target_spread_eur_mwh":
+        typer.echo(
+            "OU calibration skipped: no intraday-vs-day-ahead spread series is available "
+            "(the target degraded to the day-ahead price level -- see `fr-power fetch`/"
+            "`features`). A price *level* is not economically mean-reverting in the sense "
+            "this model assumes, so it is not calibrated.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    spread = matrix[target_col]
+    params = estimate_ou(
+        spread, method=cfg.ou.estimation.method, min_observations=cfg.ou.estimation.min_observations
     )
+    thresholds = thresholds_from_config(cfg.ou.optimal_stopping)
+
+    typer.echo(f"  method: {params.method}")
+    typer.echo(f"  kappa (mean-reversion speed): {params.kappa:.4f} / period")
+    typer.echo(f"  mu (long-run mean): {params.mu:.4f} EUR/MWh")
+    typer.echo(f"  sigma: {params.sigma:.4f}")
+    typer.echo(f"  half-life: {params.half_life:.2f} periods")
+    typer.echo(f"  stationary std: {params.stationary_std:.4f} EUR/MWh")
+    typer.echo(f"  R^2: {params.r_squared:.4f}  (n={params.n_observations})")
+
+    z_scores = compute_z_score(spread, params)
+    positions = generate_positions(z_scores, thresholds)
+
+    n_trades = int(positions["is_entry"].sum())
+    hours_in_position = int((positions["position"] != "flat").sum())
+    avg_holding_hours = hours_in_position / n_trades if n_trades else 0.0
+    typer.echo(f"  trades: {n_trades}, avg holding: {avg_holding_hours:.1f}h")
+
+    reports_dir = Path("reports")
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "method": params.method,
+        "kappa": params.kappa,
+        "mu": params.mu,
+        "sigma": params.sigma,
+        "half_life_periods": params.half_life,
+        "stationary_std": params.stationary_std,
+        "r_squared": params.r_squared,
+        "n_observations": params.n_observations,
+        "thresholds": {
+            "entry_z": thresholds.entry_z,
+            "exit_z": thresholds.exit_z,
+            "no_trade_z": thresholds.no_trade_z,
+            "max_holding_hours": thresholds.max_holding_hours,
+        },
+        "n_trades": n_trades,
+        "avg_holding_hours": avg_holding_hours,
+    }
+    summary_path = reports_dir / "ou_calibration.json"
+    summary_path.write_text(json.dumps(summary, indent=2))
+
+    positions_path = Path(cfg.data.processed_dir) / "ou_positions.parquet"
+    cache.write_cache(positions.assign(z_score=z_scores), positions_path)
+
+    typer.echo(f"  saved: {summary_path}")
+    typer.echo(f"  saved: {positions_path}")
 
 
 @app.command()

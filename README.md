@@ -106,9 +106,9 @@ degrade to a day-ahead-price forecasting task (see Phase 1).
 
 ## How to run
 
-Each pipeline stage is its own CLI command (`fetch`, `features` and
-`train` are implemented; the rest are stubs -- see the build plan below
-for when each lands):
+Each pipeline stage is its own CLI command (`fetch`, `features`, `train`
+and `calibrate` are implemented; the rest are stubs -- see the build plan
+below for when each lands):
 
 ```powershell
 uv run fr-power fetch      --config configs/default.yaml   # add --force-refresh to bypass the parquet cache
@@ -215,6 +215,54 @@ will show up directly in this table -- see
 [Limitations and realism](#limitations-and-realism) once real data is run
 through the pipeline.
 
+### OU spread model and optimal stopping (Phase 4, the differentiator)
+
+`fr-power calibrate` fits an Ornstein-Uhlenbeck process,
+`dX = kappa(mu - X)dt + sigma dW`, to the intraday-vs-day-ahead spread
+series and derives an execution rule for *when* to close a position --
+this is the extension beyond the source paper, which left an explicit
+threshold rule as future work.
+
+**Calibration** (`ou/estimate.py`) fits the exact discrete-time AR(1)
+transition of the OU process (`ou.estimation.method: "ols"` or `"mle"`).
+A close look at the math shows these two methods necessarily produce
+*identical* kappa/mu point estimates -- under the exact Gaussian
+transition density, MLE for the mean parameters is exactly the
+least-squares fit -- and differ only in the degrees-of-freedom used for
+the volatility (sigma) estimate. Reporting both anyway, rather than
+picking one and hiding the redundancy, is itself the kind of honesty this
+project is trying to model. Reported diagnostics: kappa (mean-reversion
+speed), mu, sigma, the mean-reversion half-life, and R^2.
+
+**Execution** (`ou/optimal_stopping.py`) is a threshold-band rule on
+z = (spread - mu) / stationary_std:
+
+- `entry_z_score`: open a position (short the spread if z > 0, long if
+  z < 0) once |z| crosses this far from fair value.
+- `exit_z_score`: close it once |z| reverts inside this band, or once
+  `max_holding_hours` elapses (pure OU mean reversion gives no
+  guaranteed reversion time).
+- `no_trade_z_score`: a **re-arming** threshold -- after a position
+  closes, no new one opens, even if |z| immediately re-crosses
+  `entry_z_score`, until the spread has first revisited this tighter band
+  near `mu`. Without it, a spread oscillating between the exit and entry
+  bands would generate a costly round-trip on every oscillation; this is
+  what makes it a genuine *no-trade zone* rather than one threshold
+  wearing two hats. (An earlier draft nested `no_trade_z_score` inside
+  `exit_z_score` directly, which made it mathematically redundant --
+  worth naming here since catching that was part of getting this layer
+  right.)
+
+`tests/ou/test_estimate.py` validates calibration against synthetic OU
+paths with known parameters; `tests/ou/test_optimal_stopping.py` traces
+the state machine (entry, exit, forced-exit on max holding, and the
+re-arming rule) against hand-computed expected sequences, including the
+whipsaw scenario the re-arming rule exists to prevent.
+
+Combining this timing signal with the Phase 3 forecast's directional
+edge/magnitude and with cost-aware position sizing is the backtest
+engine's job (Phase 5).
+
 ## Development
 
 ```powershell
@@ -239,7 +287,7 @@ and pull request; see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
       documented information timeline, leakage tests.
 - [x] **Phase 3 — Forecasting.** Naive, LEAR, LightGBM, LSTM (point +
       quantile), walk-forward evaluation, Diebold-Mariano tests.
-- [ ] **Phase 4 — OU spread model and optimal-stopping execution.**
+- [x] **Phase 4 — OU spread model and optimal-stopping execution.**
 - [ ] **Phase 5 — Backtest engine.** Walk-forward, costs, sizing, bootstrap
       CIs, cost-sensitivity sweep.
 - [ ] **Phase 6 — Analysis and conclusion on the French market.**
