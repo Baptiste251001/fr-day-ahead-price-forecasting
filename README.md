@@ -106,8 +106,9 @@ degrade to a day-ahead-price forecasting task (see Phase 1).
 
 ## How to run
 
-Each pipeline stage is its own CLI command (`fetch` is implemented; the
-rest are stubs -- see the build plan below for when each lands):
+Each pipeline stage is its own CLI command (`fetch` and `features` are
+implemented; the rest are stubs -- see the build plan below for when each
+lands):
 
 ```powershell
 uv run fr-power fetch      --config configs/default.yaml   # add --force-refresh to bypass the parquet cache
@@ -145,6 +146,37 @@ uv run fr-power report     --config configs/default.yaml
   source from RTE's own Data Portal. Requires `RTE_CLIENT_ID` /
   `RTE_CLIENT_SECRET` and `data.rte_eco2mix.enabled: true`.
 
+### Point-in-time feature matrix (Phase 2)
+
+`fr-power features` reads the cached raw data and assembles an hourly
+feature matrix, saved to `data/processed/feature_matrix.parquet` (plus a
+`.meta.json` sidecar recording the target column name, since parquet
+doesn't preserve pandas' `DataFrame.attrs`).
+
+The full information-timeline rationale lives in the module docstring of
+[`src/fr_power/features/build.py`](src/fr_power/features/build.py); in
+short, everything is built around what is actually knowable at the ~13:00
+CET/CEST D-1 decision point:
+
+- The day-ahead price, ENTSO-E's day-ahead wind/solar and load forecasts,
+  and the day-ahead net cross-border position are all D-1-published
+  quantities *for* day D, so they're used unlagged.
+- Realized generation by type and actual temperature are **not** known for
+  day D at that point, so both are lagged (`generation_availability_lag_hours`,
+  `weather_availability_lag_hours`, default 24h each) -- the most recent
+  values knowable as of D-1 13:00, used as persistence proxies. Using
+  lagged *actual* weather instead of a true weather *forecast* is a
+  deliberate, documented simplification (no free long-history archive of
+  historical weather forecasts exists) -- see `reports/conclusions.md`.
+- When intraday data is unavailable (the default, pending a paid feed),
+  the target degrades to the day-ahead price level itself, and the
+  current-hour day-ahead price is excluded from the *feature* set so the
+  model is never handed its own target.
+
+`tests/features/test_build.py` uses sentinel data (values equal to a
+traceable integer position) to directly verify each lag/rolling feature
+only ever pulls from strictly earlier delivery hours.
+
 ## Development
 
 ```powershell
@@ -165,7 +197,7 @@ and pull request; see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 - [x] **Phase 1 — Data ingestion.** ENTSO-E (DA prices, DA wind/solar/load
       forecasts, generation by type, net cross-border position), pluggable
       intraday source, optional weather (HDD/CDD) and RTE eCO2mix.
-- [ ] **Phase 2 — Feature engineering.** Point-in-time feature matrix,
+- [x] **Phase 2 — Feature engineering.** Point-in-time feature matrix,
       documented information timeline, leakage tests.
 - [ ] **Phase 3 — Forecasting.** Naive, LEAR, LightGBM, LSTM (point +
       quantile), walk-forward evaluation, Diebold-Mariano tests.

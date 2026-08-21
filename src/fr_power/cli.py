@@ -9,12 +9,14 @@ Each pipeline stage is its own subcommand so that a full run is:
     fr-power backtest --config configs/default.yaml
     fr-power report --config configs/default.yaml
 
-Every command is a stub in Phase 0; each is implemented in the phase that
-owns it (see README build-plan section).
+`fetch` and `features` are implemented; `train`, `calibrate`, `backtest`
+and `report` are stubs, implemented in the phase that owns them (see
+README build-plan section).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -22,7 +24,8 @@ import pandas as pd
 import typer
 
 from fr_power.config import DEFAULT_CONFIG_PATH, Config, Secrets, load_config, load_secrets
-from fr_power.data import entsoe, intraday, rte, weather
+from fr_power.data import cache, entsoe, intraday, rte, weather
+from fr_power.features.build import build_feature_matrix
 
 app = typer.Typer(
     name="fr-power",
@@ -101,14 +104,64 @@ def _run_fetch(cfg: Config, secrets: Secrets, force_refresh: bool) -> None:
         typer.echo(f"  rte_eco2mix: {len(eco2mix_df)} rows")
 
 
+_ENTSOE_CACHE_NAMES = {
+    "day_ahead_prices": "entsoe_day_ahead_prices",
+    "day_ahead_wind_solar_forecast": "entsoe_day_ahead_wind_solar_forecast",
+    "day_ahead_load_forecast": "entsoe_day_ahead_load_forecast",
+    "actual_generation_by_type": "entsoe_actual_generation_by_type",
+    "cross_border_flows": "entsoe_net_cross_border_position",
+}
+
+
 @app.command()
 def features(config: Path = ConfigOption) -> None:
     """Build the point-in-time feature matrix from cached raw data."""
     cfg = load_config(config)
     _setup_logging(cfg.logging.level)
-    typer.echo(
-        "[stub] features: would build the point-in-time feature matrix. Implemented in Phase 2."
+    _run_features(cfg)
+
+
+def _run_features(cfg: Config) -> None:
+    raw_dir = Path(cfg.data.raw_dir)
+
+    missing = [
+        name
+        for name, cache_name in _ENTSOE_CACHE_NAMES.items()
+        if cache.read_cache(cache.cache_path(raw_dir, cache_name)) is None
+    ]
+    if missing:
+        typer.echo(
+            f"ERROR: missing cached ENTSO-E data for: {', '.join(missing)}. "
+            "Run `fr-power fetch` first.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    raw = {
+        name: cache.read_cache(cache.cache_path(raw_dir, cache_name))
+        for name, cache_name in _ENTSOE_CACHE_NAMES.items()
+    }
+    weather_df = cache.read_cache(cache.cache_path(raw_dir, "weather_fr_population_weighted"))
+    intraday_df = intraday.get_intraday_source(cfg.data.intraday).load()
+
+    matrix = build_feature_matrix(
+        day_ahead_prices=raw["day_ahead_prices"],
+        wind_solar_forecast=raw["day_ahead_wind_solar_forecast"],
+        load_forecast=raw["day_ahead_load_forecast"],
+        actual_generation_by_type=raw["actual_generation_by_type"],
+        net_position=raw["cross_border_flows"],
+        config=cfg.features,
+        weather=weather_df,
+        intraday=intraday_df,
     )
+
+    out_path = Path(cfg.data.processed_dir) / "feature_matrix.parquet"
+    cache.write_cache(matrix, out_path)
+    meta_path = out_path.with_suffix(".meta.json")
+    meta_path.write_text(json.dumps({"target_column": matrix.attrs["target_column"]}))
+
+    typer.echo(f"  feature matrix: {matrix.shape[0]} rows x {matrix.shape[1]} cols -> {out_path}")
+    typer.echo(f"  target column: {matrix.attrs['target_column']}")
 
 
 @app.command()

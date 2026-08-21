@@ -154,6 +154,14 @@ class ModelsConfig(BaseModel):
     lstm: LstmModelConfig
 
 
+class FeaturesConfig(BaseModel):
+    price_lags_hours: list[int]
+    price_rolling_windows_hours: list[int]
+    spread_lags_hours: list[int]
+    generation_availability_lag_hours: int = Field(gt=0)
+    weather_availability_lag_hours: int = Field(gt=0)
+
+
 class OuEstimationConfig(BaseModel):
     method: Literal["ols", "mle"]
     min_observations: int = Field(gt=1)
@@ -184,6 +192,7 @@ class Config(BaseModel):
     costs: CostsConfig
     backtest: BacktestConfig
     models: ModelsConfig
+    features: FeaturesConfig
     ou: OuConfig
     logging: LoggingConfig
 

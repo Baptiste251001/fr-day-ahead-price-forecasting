@@ -106,6 +106,23 @@ models:
     early_stopping_patience: 10
     quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
 
+features:
+  # Autoregressive structure on the day-ahead price and (when available)
+  # the intraday-vs-day-ahead spread. All lags/windows are in hourly
+  # delivery periods and always look strictly backward from the delivery
+  # hour, never forward.
+  price_lags_hours: [24, 48, 168]
+  price_rolling_windows_hours: [24, 168]
+  spread_lags_hours: [24, 168]
+  # Realized (not day-ahead-forecast) series -- actual generation by type
+  # and actual weather -- are not known for delivery day D at the ~13:00
+  # D-1 decision point. They are shifted forward by this many hours so
+  # only what is knowable at decision time is used. See
+  # src/fr_power/features/build.py module docstring for the full
+  # information-timeline rationale.
+  generation_availability_lag_hours: 24
+  weather_availability_lag_hours: 24
+
 ou:
   estimation:
     method: "ols"  # "ols" or "mle"
