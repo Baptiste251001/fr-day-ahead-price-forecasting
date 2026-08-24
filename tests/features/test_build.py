@@ -19,6 +19,7 @@ from fr_power.features.build import (
     compute_renewable_forecast_mw,
     compute_residual_load_mw,
     expand_daily_to_hourly,
+    fill_untracked_generation_categories,
     lag_realized_series,
 )
 
@@ -95,6 +96,51 @@ def test_expand_daily_to_hourly_broadcasts_each_day() -> None:
 
     assert (expanded["hdd"].iloc[:24] == 7.0).all()
     assert (expanded["hdd"].iloc[24:] == 3.0).all()
+
+
+def test_fill_untracked_generation_fills_leading_nan_only_column() -> None:
+    # "Energy storage"-style column: not tracked for the first 3 rows, always present after.
+    index = _grid(6)
+    df = pd.DataFrame(
+        {
+            "Nuclear": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "Energy storage": [np.nan, np.nan, np.nan, 10.0, 11.0, 12.0],
+        },
+        index=index,
+    )
+
+    filled = fill_untracked_generation_categories(df)
+
+    assert filled["Energy storage"].tolist() == [0.0, 0.0, 0.0, 10.0, 11.0, 12.0]
+    assert filled["Nuclear"].tolist() == df["Nuclear"].tolist()
+
+
+def test_fill_untracked_generation_leaves_interior_gaps_untouched() -> None:
+    # A genuine reporting gap in an already-active technology -- must NOT be zeroed.
+    index = _grid(5)
+    df = pd.DataFrame({"Nuclear": [1.0, 2.0, np.nan, 4.0, 5.0]}, index=index)
+
+    filled = fill_untracked_generation_categories(df)
+
+    assert filled["Nuclear"].isna().tolist() == [False, False, True, False, False]
+
+
+def test_fill_untracked_generation_leaves_entirely_missing_column_untouched() -> None:
+    index = _grid(3)
+    df = pd.DataFrame({"Mystery": [np.nan, np.nan, np.nan]}, index=index)
+
+    filled = fill_untracked_generation_categories(df)
+
+    assert filled["Mystery"].isna().all()
+
+
+def test_fill_untracked_generation_leaves_complete_column_untouched() -> None:
+    index = _grid(3)
+    df = pd.DataFrame({"Nuclear": [1.0, 2.0, 3.0]}, index=index)
+
+    filled = fill_untracked_generation_categories(df)
+
+    pd.testing.assert_series_equal(filled["Nuclear"], df["Nuclear"])
 
 
 @pytest.fixture

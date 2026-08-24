@@ -102,6 +102,33 @@ def add_rolling_features(
     return pd.DataFrame(out, index=series.index)
 
 
+def fill_untracked_generation_categories(actual_generation_by_type: pd.DataFrame) -> pd.DataFrame:
+    """Fill NaN in generation-by-type columns that are NaN for an entire leading stretch.
+
+    ENTSO-E's set of reported production types for FR has grown over time (e.g. grid-scale
+    battery storage and offshore wind only began reporting partway through 2019-2026): a
+    column that is NaN for its first N rows then transitions to real values almost certainly
+    represents "this technology had ~zero installed capacity / wasn't tracked yet", not a
+    reporting gap for an active technology -- filling those with 0 is the economically
+    correct read, and it avoids a single such column poisoning every row via NaN-propagation
+    once lagged (`lag_realized_series`) and later required to be complete by strict models
+    (e.g. LEAR's `notna().all(axis=1)` mask). Columns with only scattered/interior NaN (a
+    genuine reporting gap in an already-active technology) are left untouched -- those should
+    stay NaN rather than be silently zeroed.
+    """
+    filled = actual_generation_by_type.copy()
+    for col in filled.columns:
+        series = filled[col]
+        first_valid = series.first_valid_index()
+        if first_valid is None or not series.isna().any():
+            continue
+        # first_valid_index() guarantees everything before it is already NaN; only fill
+        # when there is no *further* NaN once the column starts reporting.
+        if not series.loc[first_valid:].isna().any():
+            filled[col] = series.fillna(0.0)
+    return filled
+
+
 def lag_realized_series(df: pd.DataFrame, availability_lag_hours: int, prefix: str) -> pd.DataFrame:
     """Shift a realized (actual, not day-ahead-forecast) series to reflect what is knowable
     `availability_lag_hours` before each delivery hour."""
@@ -141,7 +168,9 @@ def build_feature_matrix(
 
     wind_solar_forecast = wind_solar_forecast.reindex(grid)
     load_forecast = load_forecast.reindex(grid)
-    actual_generation_by_type = actual_generation_by_type.reindex(grid)
+    actual_generation_by_type = fill_untracked_generation_categories(
+        actual_generation_by_type.reindex(grid)
+    )
     net_position = net_position.reindex(grid)
 
     calendar = add_calendar_features(grid)
