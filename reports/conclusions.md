@@ -20,14 +20,68 @@ producing a single polished-looking report.
    market.** Every such figure below is explicitly labeled "(synthetic
    demo)".
 
-No `.env` with a real `ENTSOE_API_TOKEN` was configured during this build,
-so `fr-power fetch` has never pulled real FR market data in this
-environment. Everything the pipeline needs to run on real data instead is
-already built and tested (Phases 1-5); the gap here is purely one of data
-access, not missing code. Whoever runs this next need only add a token
-(see `.env.example`), run `fr-power fetch features train calibrate
-backtest`, and the real numbers replace the synthetic ones in this same
-structure — nothing about the analysis framework changes.
+**Update: a real ENTSO-E API token was obtained and `fr-power fetch` /
+`features` / `train` have now been run against real FR data** (2019-01-01
+through 2026-08-22, ~66,950 hourly rows). The forecasting results in the
+new section below ("Real FR day-ahead price forecasting results") are
+genuine, not synthetic. **`fr-power calibrate` and `fr-power backtest`
+still have not run on real data**, because no granular intraday feed is
+configured (see Limitations) -- the target degraded to the day-ahead
+price *level*, and OU calibration / the backtest both correctly refuse to
+run against a price level rather than a genuine spread. The OU/backtest
+sections below therefore remain synthetic-demo-only. Getting real numbers
+for those specifically requires a paid EPEX ID1/ID3 feed, not just an
+ENTSO-E token.
+
+## Real FR day-ahead price forecasting results (real data, 2019-2026)
+
+`fr-power train`, run walk-forward (69 folds, expanding window, retrained
+every 30 days) on 66,953 hours of real FR day-ahead prices and ENTSO-E
+day-ahead forecasts, gives an unambiguous, honest result:
+
+| model | RMSE (EUR/MWh) | MAE (EUR/MWh) | MdAE (EUR/MWh) |
+|---|---:|---:|---:|
+| naive (persistence, 168h) | 61.73 | 37.69 | 23.14 |
+| **LEAR** | **33.41** | **18.91** | **12.52** |
+| LightGBM | 56.95 | 29.14 | 14.11 |
+| LSTM | 56.73 | 32.43 | 19.06 |
+
+**LEAR wins by a wide margin.** It cuts RMSE by 46% versus naive
+persistence; LightGBM and LSTM barely beat naive at all (8-8.4% RMSE
+reduction) with the default, untuned hyperparameters in
+`configs/default.yaml`. Diebold-Mariano tests confirm this is not noise:
+
+| challenger | baseline | DM stat | p-value |
+|---|---|---:|---:|
+| LEAR | naive | -14.27 | <0.001 |
+| LightGBM | naive | -2.87 | 0.004 |
+| **LightGBM** | **LEAR** | **+38.26** | **<0.001** |
+| LSTM | naive | -2.40 | 0.017 |
+| **LSTM** | **LEAR** | **+31.14** | **<0.001** |
+
+A positive DM statistic means the challenger has *higher* loss than the
+baseline: LightGBM and LSTM are both significantly *worse* than LEAR
+here, not just non-significantly different. This is exactly the honesty
+this project was built around -- the brief's own framing was "LEAR is
+notoriously hard to beat... beating it is the bar," and on real French
+data, at these default hyperparameters, neither of the fancier models
+clears that bar. Two candidate explanations, both plausible and not
+mutually exclusive: (1) the LightGBM/LSTM hyperparameters in
+`configs/default.yaml` were never tuned against real data (they were
+chosen to be reasonable defaults, then validated for correctness on
+synthetic data, which has a much cleaner signal); (2) day-ahead FR price
+dynamics over 2019-2026 -- spanning the 2021-2022 energy crisis, a
+structural regime shift -- may genuinely favor a regularized linear model
+that adapts smoothly over LightGBM/LSTM's higher-variance fits, especially
+walk-forward with only 30-day retraining windows relative to the
+crisis-era volatility. Distinguishing these (e.g. via a hyperparameter
+sweep, or a regime-split re-run once real backtest data is available)
+is the natural next step, not a conclusion this document reaches.
+
+A sklearn `ConvergenceWarning` appeared for LEAR's `LassoCV` on a couple
+of the very largest (latest) folds -- worth a `max_iter` increase if this
+pipeline is extended, though it did not prevent those folds from
+completing.
 
 ## Does the strategy survive transaction costs? (synthetic demo)
 
@@ -104,14 +158,40 @@ rather than appearing as a separable feature. That the method recovers a
 ranking consistent with how the data was actually generated is reassuring
 before trusting it on real data, where the ground truth is unknown.
 
-**On real FR data**, based on established EPF literature and the French
-generation mix (see below), the expected top drivers are residual load
-(load minus wind minus solar -- the single most consistently important
-feature across EPF studies), nuclear availability/outage indicators, and
-temperature/HDD in winter months. Confirming or overturning that
-expectation is exactly what `fr-power train` run on real data, followed
-by the same `LGBMRegressor.feature_importances_` inspection shown in
-`notebooks/02_forecast_eval.ipynb`, will answer.
+**On real FR data**, that hypothesis holds up. LightGBM's top-12 feature
+importances (by split count), fit on the full real 2019-2026 sample:
+
+1. `day_ahead_price_rollstd_24h`
+2. `residual_load_forecast_mw`
+3. `day_ahead_price_rollmean_24h`
+4. `hour`
+5. `wind_forecast_mw`
+6. `day_ahead_price_rollstd_168h`
+7. `day_of_week`
+8. `day_ahead_price_lag_168h`
+9. `generation_Nuclear_lag24h`
+10. `generation_Wind Onshore_lag24h`
+11. `day_ahead_price_rollmean_168h`
+12. `day_ahead_price_lag_24h`
+
+`residual_load_forecast_mw` lands at #2 -- the single most consistently
+important EPF feature in the literature, confirmed here -- and
+`generation_Nuclear_lag24h` and `wind_forecast_mw` both make the top 12,
+exactly the nuclear-availability and renewable-forecast channels
+hypothesized above. The price's own recent volatility
+(`rollstd_24h`, #1) and level (`rollmean_24h`, #3) dominate overall,
+which is unsurprising for a level-forecasting task (recall: the target
+here is the day-ahead price *level*, not the spread, since no intraday
+feed is configured) and consistent with price dynamics being strongly
+autocorrelated/regime-dependent over a period that includes the 2021-2022
+crisis. Calendar features (`hour`, `day_of_week`) also rank highly,
+reflecting FR's pronounced daily/weekly demand and solar-generation
+cycles. Temperature/HDD features do not make the top 12 here -- plausibly
+because their signal is already substantially captured by
+`residual_load_forecast_mw` (ENTSO-E's own load forecast already
+internalizes weather effects) and by the 24h-lagged-actual-weather
+simplification (see Limitations) being a noisier proxy than a same-day
+forecast would be.
 
 ## French vs. Danish market structure, and what it implies for spread predictability
 
@@ -224,11 +304,24 @@ so a reader gets the full picture in one place:
   price *level* rather than the intraday-vs-day-ahead spread, and OU
   calibration / the backtest are skipped entirely (both explicitly refuse
   to run against a price level, since it is not economically
-  mean-reverting the way this project's models assume). All results
-  described in this document as "synthetic demo" assume synthetic
-  intraday data was supplied; without any intraday data at all (this
-  build's actual current state), only Phases 1-3's day-ahead forecasting
-  machinery is exercised on real data.
+  mean-reverting the way this project's models assume). This is exactly
+  what happened on the real 2019-2026 FR run: Phases 1-3 (fetch, features,
+  forecasting) ran on genuine real data and produced the results above;
+  Phases 4-5 (OU calibration, backtest) remain synthetic-demo-only pending
+  a paid intraday feed.
+- **ENTSO-E discontinued FR's net cross-border position feed.** A live
+  fetch found `query_net_position` returns data for FR only through
+  2025-09-30 -- ENTSO-E/RTE appear to have stopped publishing it after
+  that date (the reason is not documented on the Transparency Platform;
+  possibly related to changing market-coupling arrangements). Keeping it
+  as a mandatory feature would have made LEAR and LSTM (both of which
+  require complete rows) produce zero predictions for the entire most
+  recent ~11 months of data -- exactly the period most relevant to
+  report on. `fr_power.features.build.build_feature_matrix` now treats
+  `net_position` as optional, and `configs/default.yaml` disables
+  fetching it by default; it can still be re-enabled for a deliberately
+  pre-2025-10 analysis. This is the kind of real-world data-availability
+  gap no amount of synthetic testing would have surfaced.
 - **Lagged actual weather stands in for a weather forecast.** No free,
   long-history archive of *historical weather forecasts* exists, so
   `fr_power.features.build` uses lagged *actual* temperature/HDD/CDD (by
@@ -284,11 +377,19 @@ copy .env.example .env   # add a real ENTSOE_API_TOKEN
 uv run fr-power fetch
 uv run fr-power features
 uv run fr-power train
-uv run fr-power calibrate
-uv run fr-power backtest
+uv run fr-power calibrate    # currently refuses: no intraday feed configured
+uv run fr-power backtest     # currently refuses: no intraday feed configured
 ```
 
-Then re-run `notebooks/01_data_exploration.ipynb` through
+**Status: `fetch`, `features` and `train` have been run against real FR
+data** (2019-01-01 to 2026-08-22) and produced the results in this
+document. `calibrate` and `backtest` still require a paid granular
+intraday feed (see Limitations) -- plugging one in at
+`data.intraday.path` and re-running the full pipeline is the single
+remaining step to replace the OU/backtest sections above with real
+numbers too.
+
+Once that's done, re-run `notebooks/01_data_exploration.ipynb` through
 `03_ou_and_backtest.ipynb` with the loaders swapped from
 `generate_synthetic_market_data` to `fr_power.data.cache.read_cache`
 against `data/raw/` and `data/processed/` -- the analysis code itself

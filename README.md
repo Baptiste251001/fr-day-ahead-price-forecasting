@@ -336,9 +336,8 @@ predictability, a 2021-2022 energy-crisis regime split) and consolidates
 every data/modelling limitation documented across the codebase into one
 place.
 
-No live ENTSO-E API token was configured during this build, so no real
-FR market data has been pulled. Rather than leave Phase 6 as an inert
-template, `src/fr_power/demo/synthetic.py` generates a synthetic,
+No live ENTSO-E API token was configured while Phase 6 was originally
+built, so `src/fr_power/demo/synthetic.py` generates a synthetic,
 illustrative FR-like dataset (a genuinely OU-distributed spread with a
 regime shift, nuclear maintenance dips, thermosensitive load, seasonal
 wind/solar, occasional negative prices) so the full pipeline --
@@ -351,6 +350,15 @@ real): `01_data_exploration.ipynb`, `02_forecast_eval.ipynb`,
 such, both in the notebooks and in `conclusions.md` -- the qualitative
 French-vs-Danish market discussion there is the genuine analytical
 content and does not depend on this synthetic data at all.
+
+**A real ENTSO-E token was since obtained**, and `fetch`/`features`/`train`
+have been run against real FR data (2019-2026, ~66,950 hourly rows) --
+see the "Real FR day-ahead price forecasting results" section of
+[`reports/conclusions.md`](reports/conclusions.md) for genuine results
+(LEAR beats LightGBM and LSTM by a wide, statistically significant
+margin). `calibrate`/`backtest` still await a paid granular intraday
+feed, without which there is no genuine spread to calibrate the OU model
+on.
 
 Running the same notebooks against real data only requires swapping the
 `generate_synthetic_market_data` call for `fr_power.data.cache.read_cache`
