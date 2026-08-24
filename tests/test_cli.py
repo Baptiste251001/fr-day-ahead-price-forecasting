@@ -145,6 +145,57 @@ def test_features_command_works_without_cross_border_cache(tmp_path: Path) -> No
     assert "net_position_mw" not in matrix.columns
 
 
+def test_features_command_ignores_stale_cross_border_cache_when_flag_disabled(
+    tmp_path: Path,
+) -> None:
+    """A cache file left over from before cross_border_flows was disabled must not leak
+    back into the feature matrix -- the config flag, not file presence, decides."""
+    raw_dir = tmp_path / "raw"
+    processed_dir = tmp_path / "processed"
+    index = pd.date_range("2024-06-01", periods=72, freq="h", tz="Europe/Paris")
+
+    cache.write_cache(
+        pd.DataFrame({"day_ahead_price_eur_mwh": np.arange(len(index), dtype=float)}, index=index),
+        cache.cache_path(raw_dir, "entsoe_day_ahead_prices"),
+    )
+    cache.write_cache(
+        pd.DataFrame(
+            {"Solar": np.full(len(index), 10.0), "Wind Onshore": np.full(len(index), 20.0)},
+            index=index,
+        ),
+        cache.cache_path(raw_dir, "entsoe_day_ahead_wind_solar_forecast"),
+    )
+    cache.write_cache(
+        pd.DataFrame({"Forecasted Load": np.full(len(index), 1000.0)}, index=index),
+        cache.cache_path(raw_dir, "entsoe_day_ahead_load_forecast"),
+    )
+    cache.write_cache(
+        pd.DataFrame({"Nuclear": np.full(len(index), 40000.0)}, index=index),
+        cache.cache_path(raw_dir, "entsoe_actual_generation_by_type"),
+    )
+    # stale leftover from an earlier run, while the config flag is now disabled
+    cache.write_cache(
+        pd.DataFrame({"net_position_mw": np.zeros(len(index))}, index=index),
+        cache.cache_path(raw_dir, "entsoe_net_cross_border_position"),
+    )
+
+    with Path(DEFAULT_CONFIG_PATH).open() as f:
+        config_dict = yaml.safe_load(f)
+    config_dict["data"]["raw_dir"] = str(raw_dir)
+    config_dict["data"]["processed_dir"] = str(processed_dir)
+    config_dict["data"]["intraday"]["source"] = "stub"
+    config_dict["data"]["entsoe"]["cross_border_flows"] = False
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump(config_dict))
+
+    result = runner.invoke(app, ["features", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.stdout
+    matrix = cache.read_cache(processed_dir / "feature_matrix.parquet")
+    assert matrix is not None
+    assert "net_position_mw" not in matrix.columns
+
+
 def test_features_command_errors_when_fetch_not_run_yet(tmp_path: Path) -> None:
     with Path(DEFAULT_CONFIG_PATH).open() as f:
         config_dict = yaml.safe_load(f)

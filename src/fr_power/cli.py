@@ -157,7 +157,11 @@ def _run_features(cfg: Config) -> None:
         name: cache.read_cache(cache.cache_path(raw_dir, cache_name))
         for name, cache_name in _REQUIRED_ENTSOE_CACHE_NAMES.items()
     }
-    net_position_df = cache.read_cache(cache.cache_path(raw_dir, _CROSS_BORDER_CACHE_NAME))
+    net_position_df = (
+        cache.read_cache(cache.cache_path(raw_dir, _CROSS_BORDER_CACHE_NAME))
+        if cfg.data.entsoe.cross_border_flows
+        else None
+    )
     weather_df = cache.read_cache(cache.cache_path(raw_dir, "weather_fr_population_weighted"))
     intraday_df = intraday.get_intraday_source(cfg.data.intraday).load()
 
