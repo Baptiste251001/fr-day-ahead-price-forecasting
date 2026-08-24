@@ -101,6 +101,50 @@ def test_features_command_builds_matrix_from_cached_data(tmp_path: Path) -> None
     assert (processed_dir / "feature_matrix.meta.json").exists()
 
 
+def test_features_command_works_without_cross_border_cache(tmp_path: Path) -> None:
+    """cross_border_flows is off by default (ENTSO-E discontinued FR's net-position feed
+    from 2025-09-30) -- `features` must not require that cache file to exist."""
+    raw_dir = tmp_path / "raw"
+    processed_dir = tmp_path / "processed"
+    index = pd.date_range("2024-06-01", periods=72, freq="h", tz="Europe/Paris")
+
+    cache.write_cache(
+        pd.DataFrame({"day_ahead_price_eur_mwh": np.arange(len(index), dtype=float)}, index=index),
+        cache.cache_path(raw_dir, "entsoe_day_ahead_prices"),
+    )
+    cache.write_cache(
+        pd.DataFrame(
+            {"Solar": np.full(len(index), 10.0), "Wind Onshore": np.full(len(index), 20.0)},
+            index=index,
+        ),
+        cache.cache_path(raw_dir, "entsoe_day_ahead_wind_solar_forecast"),
+    )
+    cache.write_cache(
+        pd.DataFrame({"Forecasted Load": np.full(len(index), 1000.0)}, index=index),
+        cache.cache_path(raw_dir, "entsoe_day_ahead_load_forecast"),
+    )
+    cache.write_cache(
+        pd.DataFrame({"Nuclear": np.full(len(index), 40000.0)}, index=index),
+        cache.cache_path(raw_dir, "entsoe_actual_generation_by_type"),
+    )
+    # deliberately no entsoe_net_cross_border_position.parquet written
+
+    with Path(DEFAULT_CONFIG_PATH).open() as f:
+        config_dict = yaml.safe_load(f)
+    config_dict["data"]["raw_dir"] = str(raw_dir)
+    config_dict["data"]["processed_dir"] = str(processed_dir)
+    config_dict["data"]["intraday"]["source"] = "stub"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.dump(config_dict))
+
+    result = runner.invoke(app, ["features", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.stdout
+    matrix = cache.read_cache(processed_dir / "feature_matrix.parquet")
+    assert matrix is not None
+    assert "net_position_mw" not in matrix.columns
+
+
 def test_features_command_errors_when_fetch_not_run_yet(tmp_path: Path) -> None:
     with Path(DEFAULT_CONFIG_PATH).open() as f:
         config_dict = yaml.safe_load(f)

@@ -117,13 +117,16 @@ def _run_fetch(cfg: Config, secrets: Secrets, force_refresh: bool) -> None:
         typer.echo(f"  rte_eco2mix: {len(eco2mix_df)} rows")
 
 
-_ENTSOE_CACHE_NAMES = {
+_REQUIRED_ENTSOE_CACHE_NAMES = {
     "day_ahead_prices": "entsoe_day_ahead_prices",
     "day_ahead_wind_solar_forecast": "entsoe_day_ahead_wind_solar_forecast",
     "day_ahead_load_forecast": "entsoe_day_ahead_load_forecast",
     "actual_generation_by_type": "entsoe_actual_generation_by_type",
-    "cross_border_flows": "entsoe_net_cross_border_position",
 }
+# cross_border_flows is optional: a live run found ENTSO-E's FR net-position feed
+# discontinued from 2025-09-30 onward, so `build_feature_matrix` treats it as optional
+# and this is not required to exist even when `fr-power fetch` was run successfully.
+_CROSS_BORDER_CACHE_NAME = "entsoe_net_cross_border_position"
 
 
 @app.command()
@@ -139,7 +142,7 @@ def _run_features(cfg: Config) -> None:
 
     missing = [
         name
-        for name, cache_name in _ENTSOE_CACHE_NAMES.items()
+        for name, cache_name in _REQUIRED_ENTSOE_CACHE_NAMES.items()
         if cache.read_cache(cache.cache_path(raw_dir, cache_name)) is None
     ]
     if missing:
@@ -152,8 +155,9 @@ def _run_features(cfg: Config) -> None:
 
     raw = {
         name: cache.read_cache(cache.cache_path(raw_dir, cache_name))
-        for name, cache_name in _ENTSOE_CACHE_NAMES.items()
+        for name, cache_name in _REQUIRED_ENTSOE_CACHE_NAMES.items()
     }
+    net_position_df = cache.read_cache(cache.cache_path(raw_dir, _CROSS_BORDER_CACHE_NAME))
     weather_df = cache.read_cache(cache.cache_path(raw_dir, "weather_fr_population_weighted"))
     intraday_df = intraday.get_intraday_source(cfg.data.intraday).load()
 
@@ -162,8 +166,8 @@ def _run_features(cfg: Config) -> None:
         wind_solar_forecast=raw["day_ahead_wind_solar_forecast"],
         load_forecast=raw["day_ahead_load_forecast"],
         actual_generation_by_type=raw["actual_generation_by_type"],
-        net_position=raw["cross_border_flows"],
         config=cfg.features,
+        net_position=net_position_df,
         weather=weather_df,
         intraday=intraday_df,
     )

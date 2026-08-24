@@ -125,6 +125,20 @@ def test_fill_untracked_generation_leaves_interior_gaps_untouched() -> None:
     assert filled["Nuclear"].isna().tolist() == [False, False, True, False, False]
 
 
+def test_fill_untracked_generation_fills_leading_gap_but_keeps_later_scattered_nan() -> None:
+    # Realistic case: a category starts reporting late AND has an occasional later gap
+    # (a genuine reporting outage) -- only the leading stretch should be zeroed.
+    index = _grid(6)
+    df = pd.DataFrame({"Wind Offshore": [np.nan, np.nan, 5.0, np.nan, 7.0, 8.0]}, index=index)
+
+    filled = fill_untracked_generation_categories(df)
+
+    assert filled["Wind Offshore"].tolist()[:2] == [0.0, 0.0]
+    assert filled["Wind Offshore"].iloc[2] == 5.0
+    assert pd.isna(filled["Wind Offshore"].iloc[3])  # scattered gap, left as NaN
+    assert filled["Wind Offshore"].tolist()[4:] == [7.0, 8.0]
+
+
 def test_fill_untracked_generation_leaves_entirely_missing_column_untouched() -> None:
     index = _grid(3)
     df = pd.DataFrame({"Mystery": [np.nan, np.nan, np.nan]}, index=index)
@@ -194,8 +208,8 @@ def test_build_feature_matrix_generation_lag_matches_point_in_time(
         inputs["wind_solar_forecast"],
         inputs["load_forecast"],
         inputs["actual_generation_by_type"],
-        inputs["net_position"],
         features_config,
+        net_position=inputs["net_position"],
         weather=inputs["weather"],
         intraday=None,
     )
@@ -217,8 +231,8 @@ def test_build_feature_matrix_weather_lag_uses_previous_day(
         inputs["wind_solar_forecast"],
         inputs["load_forecast"],
         inputs["actual_generation_by_type"],
-        inputs["net_position"],
         features_config,
+        net_position=inputs["net_position"],
         weather=inputs["weather"],
         intraday=None,
     )
@@ -238,8 +252,8 @@ def test_build_feature_matrix_without_intraday_excludes_current_price_feature(
         inputs["wind_solar_forecast"],
         inputs["load_forecast"],
         inputs["actual_generation_by_type"],
-        inputs["net_position"],
         features_config,
+        net_position=inputs["net_position"],
         weather=inputs["weather"],
         intraday=None,
     )
@@ -262,8 +276,8 @@ def test_build_feature_matrix_with_intraday_uses_spread_target(
         inputs["wind_solar_forecast"],
         inputs["load_forecast"],
         inputs["actual_generation_by_type"],
-        inputs["net_position"],
         features_config,
+        net_position=inputs["net_position"],
         weather=inputs["weather"],
         intraday=inputs["intraday"],
     )
@@ -271,3 +285,22 @@ def test_build_feature_matrix_with_intraday_uses_spread_target(
     assert matrix.attrs["target_column"] == "target_spread_eur_mwh"
     assert "day_ahead_price_eur_mwh" in matrix.columns
     assert (matrix["target_spread_eur_mwh"] == 5.0).all()
+
+
+def test_build_feature_matrix_without_net_position_omits_column(
+    features_config: FeaturesConfig,
+) -> None:
+    inputs = _synthetic_inputs()
+    matrix = build_feature_matrix(
+        inputs["day_ahead_prices"],
+        inputs["wind_solar_forecast"],
+        inputs["load_forecast"],
+        inputs["actual_generation_by_type"],
+        features_config,
+        net_position=None,
+        weather=inputs["weather"],
+        intraday=None,
+    )
+
+    assert "net_position_mw" not in matrix.columns
+    assert len(matrix) == len(inputs["day_ahead_prices"])

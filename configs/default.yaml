@@ -33,7 +33,12 @@ data:
     day_ahead_wind_solar_forecast: true
     day_ahead_load_forecast: true
     actual_generation_by_type: true
-    cross_border_flows: true
+    # Off by default: a live run found ENTSO-E's FR net-position feed discontinued
+    # from 2025-09-30 onward. With it required, LEAR/LSTM (which need complete rows)
+    # would produce zero predictions for the entire recent tail of the dataset --
+    # the most relevant period. build_feature_matrix treats it as optional; enable
+    # this only for a deliberately pre-2025-10 backtest.
+    cross_border_flows: false
 
   intraday:
     # No free, granular EPEX ID3/ID1 index is bundled by default.

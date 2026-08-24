@@ -15,7 +15,10 @@ public. At that same moment, what is knowable about day D is:
     `load_forecast_mw`, and the derived `residual_load_forecast_mw`).
   * ENTSO-E's day-ahead net cross-border position for day D
     (`query_net_position(..., dayahead=True)`) -- also a D-1-published
-    quantity for delivery day D, used as-is.
+    quantity for delivery day D, used as-is when supplied. This series is
+    optional (`net_position=None` omits it): a live run found ENTSO-E's FR
+    feed for it discontinued from 2025-09-30 onward, and `configs/default.yaml`
+    disables fetching it by default as a result -- see `build_feature_matrix`.
   * Realized (actual) generation by production type is NOT known for day D
     at this point -- it is only published as the operating day unfolds.
     It is used lagged by `features.generation_availability_lag_hours`
@@ -103,29 +106,29 @@ def add_rolling_features(
 
 
 def fill_untracked_generation_categories(actual_generation_by_type: pd.DataFrame) -> pd.DataFrame:
-    """Fill NaN in generation-by-type columns that are NaN for an entire leading stretch.
+    """Fill the *leading* all-NaN stretch of each generation-by-type column with 0.
 
     ENTSO-E's set of reported production types for FR has grown over time (e.g. grid-scale
     battery storage and offshore wind only began reporting partway through 2019-2026): a
     column that is NaN for its first N rows then transitions to real values almost certainly
     represents "this technology had ~zero installed capacity / wasn't tracked yet", not a
-    reporting gap for an active technology -- filling those with 0 is the economically
-    correct read, and it avoids a single such column poisoning every row via NaN-propagation
-    once lagged (`lag_realized_series`) and later required to be complete by strict models
-    (e.g. LEAR's `notna().all(axis=1)` mask). Columns with only scattered/interior NaN (a
-    genuine reporting gap in an already-active technology) are left untouched -- those should
-    stay NaN rather than be silently zeroed.
+    reporting gap for an active technology -- filling that leading stretch with 0 is the
+    economically correct read, and it avoids it poisoning every one of those early rows via
+    NaN-propagation once lagged (`lag_realized_series`) and later required to be complete by
+    strict models (e.g. LEAR's `notna().all(axis=1)` mask).
+
+    Only the strict leading stretch (before the column's first real value) is touched --
+    scattered/interior NaN once a technology is active (a genuine reporting gap, and common
+    enough in real ENTSO-E data even for well-established categories) are left as NaN.
     """
     filled = actual_generation_by_type.copy()
     for col in filled.columns:
         series = filled[col]
         first_valid = series.first_valid_index()
-        if first_valid is None or not series.isna().any():
+        if first_valid is None:
             continue
-        # first_valid_index() guarantees everything before it is already NaN; only fill
-        # when there is no *further* NaN once the column starts reporting.
-        if not series.loc[first_valid:].isna().any():
-            filled[col] = series.fillna(0.0)
+        leading = series.index < first_valid
+        filled.loc[leading, col] = series.loc[leading].fillna(0.0)
     return filled
 
 
@@ -153,8 +156,8 @@ def build_feature_matrix(
     wind_solar_forecast: pd.DataFrame,
     load_forecast: pd.DataFrame,
     actual_generation_by_type: pd.DataFrame,
-    net_position: pd.DataFrame,
     config: FeaturesConfig,
+    net_position: pd.DataFrame | None = None,
     weather: pd.DataFrame | None = None,
     intraday: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
@@ -162,6 +165,13 @@ def build_feature_matrix(
 
     The DA price index is treated as the authoritative hourly delivery grid; all other inputs
     are reindexed onto it (introducing NaNs where a source has gaps, handled downstream).
+
+    `net_position` is optional: ENTSO-E's FR net cross-border position feed was found (via a
+    live run) to have been discontinued around 2025-09-30 -- with it required, every model
+    needing complete rows (LEAR, LSTM) would silently produce zero predictions for the entire
+    tail of the dataset, the most recent and most relevant period. `configs/default.yaml`
+    disables `entsoe.cross_border_flows` by default for this reason; the column is only added
+    when `net_position` is supplied (e.g. for a deliberately pre-2025-10 backtest).
     """
     da_price = day_ahead_prices["day_ahead_price_eur_mwh"]
     grid = da_price.index
@@ -171,7 +181,6 @@ def build_feature_matrix(
     actual_generation_by_type = fill_untracked_generation_categories(
         actual_generation_by_type.reindex(grid)
     )
-    net_position = net_position.reindex(grid)
 
     calendar = add_calendar_features(grid)
     renewables = compute_renewable_forecast_mw(wind_solar_forecast)
@@ -191,11 +200,18 @@ def build_feature_matrix(
         renewables,
         load_series,
         residual_load,
-        net_position,
         price_lags,
         price_rolling,
         generation_lagged,
     ]
+
+    if net_position is not None:
+        frames.append(net_position.reindex(grid))
+    else:
+        logger.warning(
+            "No net cross-border position data supplied; net_position_mw will be absent "
+            "from the feature matrix."
+        )
 
     if weather is not None:
         weather_hourly = expand_daily_to_hourly(weather, grid)
