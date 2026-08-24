@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from entsoe.exceptions import NoMatchingDataError
 
 from fr_power.config import EntsoeSeriesConfig, Secrets
 from fr_power.data import entsoe
@@ -112,3 +113,31 @@ def test_fetch_all_uses_cache_on_second_call(fake_client: FakeClient, tmp_path: 
     entsoe.fetch_all(fake_client, _index()[0], _index()[-1], tmp_path, flags)
 
     assert fake_client.calls.count("query_day_ahead_prices") == 1
+
+
+class _PartiallyUnavailableClient(FakeClient):
+    """Like FakeClient, but net position is not published for this bidding zone/period --
+    the real-world case that surfaced this (FR does not always publish it)."""
+
+    def query_net_position(
+        self, country_code: str, start: pd.Timestamp, end: pd.Timestamp, dayahead: bool
+    ) -> pd.Series:
+        self.calls.append("query_net_position")
+        raise NoMatchingDataError
+
+
+def test_fetch_all_skips_a_series_that_has_no_matching_data(tmp_path: Path) -> None:
+    client = _PartiallyUnavailableClient()
+    flags = EntsoeSeriesConfig(
+        day_ahead_prices=True,
+        day_ahead_wind_solar_forecast=False,
+        day_ahead_load_forecast=False,
+        actual_generation_by_type=False,
+        cross_border_flows=True,
+    )
+
+    results = entsoe.fetch_all(client, _index()[0], _index()[-1], tmp_path, flags)
+
+    assert set(results.keys()) == {"day_ahead_prices"}
+    assert "cross_border_flows" not in results
+    assert not (tmp_path / "entsoe_net_cross_border_position.parquet").exists()

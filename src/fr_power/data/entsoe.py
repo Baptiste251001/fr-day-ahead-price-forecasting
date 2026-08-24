@@ -22,7 +22,9 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import requests
 from entsoe import EntsoePandasClient
+from entsoe.exceptions import NoMatchingDataError
 
 from fr_power.config import EntsoeSeriesConfig, Secrets
 from fr_power.data.cache import cached_fetch
@@ -109,17 +111,34 @@ def fetch_all(
     series_flags: EntsoeSeriesConfig,
     force_refresh: bool = False,
 ) -> dict[str, pd.DataFrame]:
-    """Fetch (or load from cache) every ENTSO-E series enabled in `series_flags`."""
+    """Fetch (or load from cache) every ENTSO-E series enabled in `series_flags`.
+
+    Not every document type is published for every bidding zone (e.g. FR does
+    not publish a day-ahead net position via `query_net_position` over every
+    period) -- a single series failing with `NoMatchingDataError` or an HTTP
+    error logs a warning and is skipped, rather than aborting the whole
+    fetch. A cached copy from a previous successful run is still returned if
+    one exists (only a *live* failure is skipped).
+    """
     results: dict[str, pd.DataFrame] = {}
     for flag_name, cache_name, fetch_fn in _SERIES:
         if not getattr(series_flags, flag_name):
             logger.info("Skipping ENTSO-E series '%s' (disabled in config).", flag_name)
             continue
         logger.info("Fetching ENTSO-E series '%s'.", flag_name)
-        results[flag_name] = cached_fetch(
-            cache_dir,
-            cache_name,
-            functools.partial(fetch_fn, client, start, end),
-            force_refresh=force_refresh,
-        )
+        try:
+            results[flag_name] = cached_fetch(
+                cache_dir,
+                cache_name,
+                functools.partial(fetch_fn, client, start, end),
+                force_refresh=force_refresh,
+            )
+        except (NoMatchingDataError, requests.exceptions.HTTPError) as exc:
+            logger.warning(
+                "ENTSO-E series '%s' is unavailable for %s to %s (%s); skipping it for this run.",
+                flag_name,
+                start,
+                end,
+                exc,
+            )
     return results
