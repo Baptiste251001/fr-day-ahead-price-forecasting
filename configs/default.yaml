@@ -17,7 +17,11 @@ market:
 
 data:
   start_date: "2019-01-01"
-  end_date: "today"  # resolved at runtime to the current UTC date
+  end_date: "today"  # resolved at runtime to current UTC date minus end_date_safety_margin_days
+  # ENTSO-E day-ahead prices and Open-Meteo's historical archive both lag a day or two
+  # behind real time; "today" as a literal upper bound risks a 400 for not-yet-cleared
+  # auctions. See Config.data.resolved_end_date.
+  end_date_safety_margin_days: 2
   raw_dir: "data/raw"
   interim_dir: "data/interim"
   processed_dir: "data/processed"

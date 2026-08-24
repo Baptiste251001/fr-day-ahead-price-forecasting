@@ -74,6 +74,13 @@ class RteEco2mixConfig(BaseModel):
 class DataConfig(BaseModel):
     start_date: dt.date
     end_date: str  # "today" resolved lazily; see `resolved_end_date`
+    # When end_date == "today", how many days to pull back from the current date before
+    # querying. ENTSO-E's day-ahead-price endpoint (and entsoe-py's own +1-day padding
+    # around it) can 400 if asked for a period extending past the last cleared auction,
+    # and Open-Meteo's historical archive similarly lags a day or two behind real time --
+    # so "today" as a literal upper bound is unsafe for any of these live sources. Only
+    # applies to the "today" sentinel; an explicit end_date is respected exactly.
+    end_date_safety_margin_days: int = Field(default=2, ge=0)
     raw_dir: str
     interim_dir: str
     processed_dir: str
@@ -85,7 +92,9 @@ class DataConfig(BaseModel):
 
     def resolved_end_date(self) -> dt.date:
         if self.end_date == "today":
-            return dt.datetime.now(dt.UTC).date()
+            return dt.datetime.now(dt.UTC).date() - dt.timedelta(
+                days=self.end_date_safety_margin_days
+            )
         return dt.date.fromisoformat(self.end_date)
 
 

@@ -26,6 +26,9 @@ def test_cli_help_lists_all_stage_commands() -> None:
 
 def test_fetch_without_api_token_exits_with_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ENTSOE_API_TOKEN", raising=False)
+    # Isolate from a real .env in the repo root (e.g. a developer's own configured
+    # token) -- this test must exercise the "no token" path regardless of local setup.
+    monkeypatch.setattr("fr_power.config.load_dotenv", lambda *args, **kwargs: False)
     result = runner.invoke(app, ["fetch"])
     assert result.exit_code == 1
     assert "ENTSOE_API_TOKEN" in result.stdout
