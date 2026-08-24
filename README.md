@@ -358,7 +358,11 @@ see the "Real FR day-ahead price forecasting results" section of
 (LEAR beats LightGBM and LSTM by a wide, statistically significant
 margin). `calibrate`/`backtest` still await a paid granular intraday
 feed, without which there is no genuine spread to calibrate the OU model
-on.
+on. [`02_forecast_eval_real.ipynb`](notebooks/02_forecast_eval_real.ipynb)
+mirrors `02_forecast_eval.ipynb`'s analysis on this real data -- it loads
+the already-computed `data/processed/forecast_predictions.parquet` rather
+than retraining (the full walk-forward took ~2h15), so it stays fast to
+re-run.
 
 Running the same notebooks against real data only requires swapping the
 `generate_synthetic_market_data` call for `fr_power.data.cache.read_cache`
