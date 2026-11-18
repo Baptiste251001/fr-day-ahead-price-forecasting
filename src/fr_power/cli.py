@@ -134,16 +134,25 @@ def train(config: Path = ConfigOption) -> None:
 
 @app.command()
 def bid(config: Path = ConfigOption) -> None:
-    """Backtest day-ahead bidding for a battery on the walk-forward forecasts."""
+    """Backtest day-ahead bidding for a battery on the walk-forward forecasts.
+
+    Hourly orders before the switch to 15-minute products, quarter-hour orders after it.
+    """
     cfg = _load(config)
-    matrix = data.read_cache(cfg.data.processed_dir / FEATURES_FILE)
-    predictions = data.read_cache(cfg.data.processed_dir / HOURLY_PREDICTIONS_FILE)
-    if matrix is None or predictions is None:
+    processed = cfg.data.processed_dir
+    prices = data.read_cache(processed / PRICES_FILE)
+    quarters = data.read_cache(processed / PREDICTIONS_FILE)
+    hourly = data.read_cache(processed / HOURLY_PREDICTIONS_FILE)
+    if prices is None or quarters is None or hourly is None:
         typer.echo("ERROR: no predictions found. Run `fr-power train` first.", err=True)
         raise typer.Exit(1)
     b = cfg.bidding
     battery = bidding.Battery(b.power_mw, b.energy_mwh, b.round_trip_efficiency)
-    actual = matrix[TARGET]
+    actual = prices["price_15min"]
+    # `<model>_hourly_flat`: the hourly forecast without the intra-hour shape, to price the
+    # shape's value in euros.
+    flat = quarter_hour.broadcast_hourly(hourly, actual.index).add_suffix("_hourly_flat")
+    predictions = pd.concat([quarters, flat], axis=1)
     daily = bidding.backtest(
         actual,
         predictions,
@@ -168,6 +177,12 @@ def bid(config: Path = ConfigOption) -> None:
     typer.echo(summary.round(3).to_string())
     typer.echo("\nProfit by year (EUR per MW):")
     typer.echo(yearly.round(0).to_string())
+    quarter_days = daily[daily.index >= data.MTU_15MIN_START.tz_localize(None)]
+    if not quarter_days.empty:
+        since = bidding.summarise(quarter_days, battery)
+        since.round(3).to_csv(reports / "bidding_15min.csv", index_label="strategy")
+        typer.echo(f"\nQuarter-hour orders since the switch ({since.attrs['n_days']:,} days):")
+        typer.echo(since.round(3).to_string())
     _bidding_figure(daily, actual, predictions[b.curve_model], battery, b, reports)
     typer.echo(f"\n  reports written to {reports}/")
 
@@ -198,15 +213,19 @@ def _bidding_figure(
     candidates = []
     for ts in daily.index[-30:]:
         day = ts.date()
-        day_forecast = forecast[forecast.index.date == day]
+        products, dt_hours = bidding.traded_products(
+            forecast[forecast.index.date == day].to_frame(), day
+        )
+        day_forecast = products.iloc[:, 0]
         scenarios = bidding.scenarios_for_day(
             day_forecast, errors, day, b.scenario_window_days, b.scenario_min_days
         )
         assert scenarios is not None  # the day was traded, so its scenarios exist
-        curves = bidding.optimal_curves(scenarios, battery)
+        curves = bidding.optimal_curves(scenarios, battery, dt_hours)
         candidates.append((best_hours(curves.quantities), day, day_forecast, curves))
     (_, buy, sell), day, day_forecast, curves = max(candidates, key=lambda c: c[0][0])
-    realized = actual.reindex(day_forecast.index).to_numpy()
+    day_actual = actual[actual.index.date == day].to_frame()
+    realized = bidding.traded_products(day_actual, day)[0].iloc[:, 0].to_numpy()
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.2), gridspec_kw={"width_ratios": [1.4, 1]})
     for name in profit:
@@ -215,9 +234,9 @@ def _bidding_figure(
     axes[0].legend(fontsize=8)
     axes[1].axhline(0, color="grey", linewidth=0.6, zorder=0)
     for h in dict.fromkeys([buy, sell]):
-        hour = day_forecast.index[h].hour
+        start = day_forecast.index[h]
         (line,) = axes[1].plot(
-            curves.prices[h], curves.quantities[h], marker=".", label=f"{hour:02d}:00"
+            curves.prices[h], curves.quantities[h], marker=".", label=f"{start:%H:%M}"
         )
         axes[1].axvline(realized[h], color=line.get_color(), linestyle=":", linewidth=1)
     axes[1].set(

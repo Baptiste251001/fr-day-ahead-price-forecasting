@@ -1,0 +1,7 @@
+strategy,profit_eur_per_mw_year,capture_vs_perfect,imbalance_mwh_per_day,cycles_per_day
+perfect_foresight,108821.716,1.0,0.0,2.578
+schedule_naive,84007.918,0.772,0.0,2.595
+schedule_lasso,91193.909,0.838,0.0,2.437
+schedule_ensemble,90356.03,0.83,0.0,2.449
+schedule_ensemble_hourly_flat,83283.679,0.765,0.0,1.773
+curves_ensemble,91142.111,0.838,0.004,2.346

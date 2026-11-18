@@ -9,12 +9,16 @@ Strategies compared on every delivery day:
 - `perfect_foresight`: the optimal schedule if day D's prices were known (upper bound).
 - `schedule_<model>`: optimise the battery on the model's point forecast and submit the
   result as price-independent quantities (the simplest desk practice).
-- `curves_<model>`: build one price-quantity bid curve per hour from forecast scenarios
+- `curves_<model>`: build one price-quantity bid curve per period from forecast scenarios
   (the model's forecast plus whole-day error vectors from the previous weeks), by
   maximising the expected profit over the scenarios. This is the classic scenario-based
   bidding formulation (Fleten & Pettersen, 2005), adapted to storage.
 
-Settlement. The executed quantity of each hour is read on its curve at the cleared price
+Each day is traded at the resolution of its products: 24 hourly orders until 30 September
+2025, 96 quarter-hour orders from 1 October 2025. Quantities are powers (MW); a period of
+`dt` hours moves `power * dt` MWh.
+
+Settlement. The executed quantity of each period is read on its curve at the cleared price
 (linear interpolation, as with EPEX linear piecewise orders). A curve set may commit the
 battery to sell energy it does not hold if the cleared prices fall outside the scenarios.
 The battery then delivers the feasible dispatch closest to its commitments, and the gap is
@@ -31,6 +35,8 @@ import numpy as np
 import pandas as pd
 from scipy import sparse
 from scipy.optimize import linprog
+
+from fr_power.data import MTU_15MIN_START
 
 # Small cost per MWh charged or discharged: it breaks ties so the optimiser never cycles
 # the battery for nothing. It is not counted in the reported profit.
@@ -50,14 +56,14 @@ class Battery:
 
 @dataclass(frozen=True)
 class BidCurves:
-    """One curve per delivery hour: increasing prices and net sell quantities (MW).
+    """One curve per delivery period: increasing prices and net sell quantities (MW).
 
     Positive quantities are sales (discharge), negative ones purchases (charge). Between
     points the curve is linear, beyond the end points it is flat.
     """
 
-    prices: np.ndarray  # shape (hours, points)
-    quantities: np.ndarray  # shape (hours, points), non-decreasing along points
+    prices: np.ndarray  # shape (periods, points)
+    quantities: np.ndarray  # shape (periods, points), non-decreasing along points
 
     def committed(self, clearing_prices: np.ndarray) -> np.ndarray:
         return np.array(
@@ -68,11 +74,11 @@ class BidCurves:
         )
 
 
-def optimal_curves(scenarios: np.ndarray, battery: Battery) -> BidCurves:
-    """Bid curves maximising the mean profit over price scenarios (shape scenarios x hours).
+def optimal_curves(scenarios: np.ndarray, battery: Battery, dt: float = 1.0) -> BidCurves:
+    """Bid curves maximising the mean profit over price scenarios (shape scenarios x periods).
 
-    The bid points of each hour are that hour's scenario prices, so in scenario s the battery
-    executes x[h, rank of s in hour h]. Curves must be non-decreasing in price (sell more
+    `dt` is the period length in hours. The bid points of each period are that period's
+    scenario prices, so in scenario s the battery executes x[h, rank of s in period h]. Curves must be non-decreasing in price (sell more
     when the price is higher), and the resulting dispatch must be feasible for the battery in
     every scenario: power limits, state of charge between 0 and capacity, empty at the start
     of the day. With a single scenario this is the deterministic optimal schedule.
@@ -96,21 +102,21 @@ def optimal_curves(scenarios: np.ndarray, battery: Battery) -> BidCurves:
 
     # Objective: minimise minus the mean revenue, sum_s sum_h price[s,h] * x[h, rank[s,h]].
     cost = np.zeros(4 * n)
-    cost[x_idx(h_grid.T.ravel(), s_grid.T.ravel())] = -sorted_prices.T.ravel() / n_s
-    cost[c0 : c0 + n] = cost[d0 : d0 + n] = _THROUGHPUT_TIE_BREAK / n_s
+    cost[x_idx(h_grid.T.ravel(), s_grid.T.ravel())] = -sorted_prices.T.ravel() * dt / n_s
+    cost[c0 : c0 + n] = cost[d0 : d0 + n] = _THROUGHPUT_TIE_BREAK * dt / n_s
 
     # Dispatch: discharge - charge - x[h, rank] = 0, for each scenario and hour.
     rows = np.concatenate([np.arange(n)] * 3)
     cols = np.concatenate([d0 + sh, c0 + sh, x_idx(h_flat, rank[s_flat, h_flat])])
     vals = np.concatenate([np.ones(n), -np.ones(n), -np.ones(n)])
-    # Energy balance: e[h] - e[h-1] - eta * charge + discharge / eta = 0, with e[-1] = 0.
+    # Energy balance: e[h] - e[h-1] - dt * (eta * charge - discharge / eta) = 0, e[-1] = 0.
     prev = sh[h_flat > 0] - 1
     rows = np.concatenate(
         [rows, n + np.arange(n), n + np.arange(n), n + np.arange(n), n + np.flatnonzero(h_flat > 0)]
     )
     cols = np.concatenate([cols, e0 + sh, c0 + sh, d0 + sh, e0 + prev])
     vals = np.concatenate(
-        [vals, np.ones(n), -eta * np.ones(n), np.ones(n) / eta, -np.ones(len(prev))]
+        [vals, np.ones(n), -eta * dt * np.ones(n), dt * np.ones(n) / eta, -np.ones(len(prev))]
     )
     a_eq = sparse.csr_array((vals, (rows, cols)), shape=(2 * n, 4 * n))
 
@@ -139,7 +145,7 @@ def optimal_curves(scenarios: np.ndarray, battery: Battery) -> BidCurves:
         A_eq=a_eq,
         b_eq=np.zeros(2 * n),
         bounds=bounds,
-        method="highs",
+        method="highs-ipm",  # ~10x faster than simplex on the 96-period problems
     )
     if not result.success:
         raise RuntimeError(f"Bidding LP failed: {result.message}")
@@ -148,11 +154,15 @@ def optimal_curves(scenarios: np.ndarray, battery: Battery) -> BidCurves:
 
 
 def settle(
-    curves: BidCurves, clearing_prices: np.ndarray, battery: Battery, imbalance_penalty: float
+    curves: BidCurves,
+    clearing_prices: np.ndarray,
+    battery: Battery,
+    imbalance_penalty: float,
+    dt: float = 1.0,
 ) -> dict[str, float]:
     """Execute the curves at the cleared prices, deliver what is feasible, settle the gap.
 
-    Profit = sum(price * delivered) - penalty * sum(|delivered - committed|): the committed
+    Profit = dt * [sum(price * delivered) - penalty * sum(|delivered - committed|)]: the committed
     volume is paid at the day-ahead price and any shortfall or excess is traded back at the
     same price plus the penalty.
 
@@ -162,20 +172,22 @@ def settle(
     can never be used to re-trade after the fact.
     """
     committed = curves.committed(clearing_prices)
-    delivered = _closest_feasible_dispatch(committed, battery)
-    imbalance = np.abs(delivered - committed).sum()
+    delivered = _closest_feasible_dispatch(committed, battery, dt)
+    imbalance = np.abs(delivered - committed).sum() * dt
     return {
-        "profit_eur": float(clearing_prices @ delivered - imbalance_penalty * imbalance),
+        "profit_eur": float(clearing_prices @ delivered * dt - imbalance_penalty * imbalance),
         "imbalance_mwh": float(imbalance),
-        "discharged_mwh": float(delivered.clip(min=0).sum()),
+        "discharged_mwh": float(delivered.clip(min=0).sum() * dt),
     }
 
 
-def _closest_feasible_dispatch(committed: np.ndarray, battery: Battery) -> np.ndarray:
+def _closest_feasible_dispatch(
+    committed: np.ndarray, battery: Battery, dt: float = 1.0
+) -> np.ndarray:
     """Net sales (MW) that minimise sum |delivered - committed| under the battery limits.
 
-    Variables per hour: charge, discharge, energy, positive and negative deviation. Like the
-    bidding optimiser, the battery may charge and discharge in the same hour, which burns
+    Variables per period: charge, discharge, energy, positive and negative deviation. Like
+    the bidding optimiser, the battery may charge and discharge in the same period, which burns
     energy as conversion losses (useful to absorb a purchase larger than the free capacity).
     """
     n, eta = len(committed), battery.one_way_efficiency
@@ -187,8 +199,8 @@ def _closest_feasible_dispatch(committed: np.ndarray, battery: Battery) -> np.nd
     rows = np.arange(n)
     # discharge - charge - up + down = committed  (delivered = committed + up - down)
     a_eq[rows, d], a_eq[rows, c], a_eq[rows, up], a_eq[rows, down] = 1, -1, -1, 1
-    # e[h] - e[h-1] - eta * charge + discharge / eta = 0, with e[-1] = 0
-    a_eq[n + rows, e], a_eq[n + rows, c], a_eq[n + rows, d] = 1, -eta, 1 / eta
+    # e[h] - e[h-1] - dt * (eta * charge - discharge / eta) = 0, with e[-1] = 0
+    a_eq[n + rows, e], a_eq[n + rows, c], a_eq[n + rows, d] = 1, -eta * dt, dt / eta
     a_eq[n + rows[1:], e[:-1]] = -1
     p, cap = battery.power_mw, battery.energy_mwh
     bounds = [(0, p)] * (2 * n) + [(0, cap)] * n + [(0, None)] * (2 * n)
@@ -199,10 +211,14 @@ def _closest_feasible_dispatch(committed: np.ndarray, battery: Battery) -> np.nd
 
 
 def error_table(actual: pd.Series, forecast: pd.Series) -> pd.DataFrame:
-    """Signed forecast errors (actual - forecast), one row per day, one column per hour."""
+    """Signed forecast errors (actual - forecast), one row per day, one column per period.
+
+    Columns are minutes since midnight in local time (0, 15, ..., 1425).
+    """
     errors = (actual - forecast).dropna()
-    table = errors.groupby([errors.index.date, errors.index.hour]).mean().unstack()
-    return table.ffill(axis=1).bfill(axis=1)  # a DST day lacks one hour label
+    slot = errors.index.hour * 60 + errors.index.minute
+    table = errors.groupby([errors.index.date, slot]).mean().unstack()
+    return table.ffill(axis=1).bfill(axis=1)  # a DST day lacks one hour of labels
 
 
 def scenarios_for_day(
@@ -212,15 +228,25 @@ def scenarios_for_day(
 
     Only errors of the `window_days` days before `day` are used; they are all known at
     decision time on D-1 (D-1's prices clear on D-2). Whole-day vectors keep the correlation
-    between hours, which is what matters for a battery. Returns None if too few days.
+    between periods, which is what matters for a battery. Returns None if too few days.
     """
     start = day - dt.timedelta(days=window_days)
     past = errors.loc[(errors.index < day) & (errors.index >= start)]
     past = past.dropna()
     if len(past) < min_days:
         return None
-    hours = forecast_day.index.hour
-    return forecast_day.to_numpy()[None, :] + past[hours].to_numpy()
+    slots = forecast_day.index.hour * 60 + forecast_day.index.minute
+    return forecast_day.to_numpy()[None, :] + past[slots].to_numpy()
+
+
+def traded_products(day_frame: pd.DataFrame, day: dt.date) -> tuple[pd.DataFrame, float]:
+    """A day's 15-minute data at the resolution of its products, and the period in hours.
+
+    Before the switch the auction traded hourly products: quarters are averaged to hours.
+    """
+    if day >= MTU_15MIN_START.date():
+        return day_frame, 0.25
+    return day_frame.resample("1h").mean(), 1.0
 
 
 def backtest(
@@ -235,15 +261,18 @@ def backtest(
 ) -> pd.DataFrame:
     """Daily profit of every strategy, on days where all forecasts and scenarios exist.
 
-    Returns one row per delivery day and a (strategy, metric) column MultiIndex with metrics
-    `profit_eur`, `imbalance_mwh` and `discharged_mwh`.
+    `actual` and `predictions` are 15-minute series. Days before the switch to 15-minute
+    products are traded as 24 hourly orders (quarters averaged to hours), later days as 96
+    quarter-hour orders. Returns one row per delivery day and a (strategy, metric) column
+    MultiIndex with metrics `profit_eur`, `imbalance_mwh` and `discharged_mwh`.
     """
     models = list(dict.fromkeys([*schedule_models, curve_model]))
     df = pd.concat([actual.rename("actual"), predictions[models]], axis=1)
     errors = error_table(actual, predictions[curve_model])
     rows = {}
-    for day, day_df in df.groupby(df.index.date):
-        if day_df.isna().any().any() or len(day_df) < 23:
+    for day, quarters in df.groupby(df.index.date):
+        day_df, dt_hours = traded_products(quarters, day)
+        if day_df.isna().any().any() or len(day_df) < 23 / dt_hours:
             continue
         scenarios = scenarios_for_day(day_df[curve_model], errors, day, window_days, min_days)
         if scenarios is None:
@@ -256,7 +285,11 @@ def backtest(
             (name, metric): value
             for name, scen in strategies.items()
             for metric, value in settle(
-                optimal_curves(scen, battery), prices, battery, imbalance_penalty
+                optimal_curves(scen, battery, dt_hours),
+                prices,
+                battery,
+                imbalance_penalty,
+                dt_hours,
             ).items()
         }
     out = pd.DataFrame.from_dict(rows, orient="index")

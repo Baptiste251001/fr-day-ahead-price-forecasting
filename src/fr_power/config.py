@@ -113,7 +113,7 @@ class BiddingConfig(BaseModel):
     power_mw: float = Field(default=1.0, gt=0)
     energy_mwh: float = Field(default=2.0, gt=0)
     round_trip_efficiency: float = Field(default=0.88, gt=0, le=1)
-    schedule_models: list[str] = ["naive", "lasso", "ensemble"]
+    schedule_models: list[str] = ["naive", "lasso", "ensemble", "ensemble_hourly_flat"]
     curve_model: str = "ensemble"
     scenario_window_days: int = Field(default=60, gt=0)
     scenario_min_days: int = Field(default=20, gt=0)

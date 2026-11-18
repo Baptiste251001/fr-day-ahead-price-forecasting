@@ -69,6 +69,8 @@ def test_features_then_train(
     assert summary.loc["perfect_foresight", "capture_vs_perfect"] == 1.0
     assert (summary["capture_vs_perfect"] <= 1.0 + 1e-9).all()
     assert (config.reports_dir / "figures" / "bidding.png").exists()
+    since = pd.read_csv(config.reports_dir / "bidding_15min.csv", index_col="strategy")
+    assert "schedule_ensemble_hourly_flat" in since.index  # quarter-hour orders were traded
 
 
 def test_commands_fail_cleanly_without_inputs(config: Config, tmp_path: Path) -> None:

@@ -18,6 +18,7 @@ from fr_power.bidding import (
     settle,
     summarise,
 )
+from fr_power.data import MTU_15MIN_START
 
 BATTERY = Battery(power_mw=1.0, energy_mwh=2.0, round_trip_efficiency=0.81)  # 0.9 each way
 
@@ -101,3 +102,29 @@ def test_backtest_ranks_perfect_foresight_first() -> None:
     assert (summary["capture_vs_perfect"] < 1.0 + 1e-9).all()
     assert summary.loc["schedule_good", "capture_vs_perfect"] > 0.5
     assert summary.loc["schedule_good", "imbalance_mwh_per_day"] == pytest.approx(0, abs=1e-4)
+
+
+def test_quarter_hour_orders_match_hourly_orders_when_quarters_share_the_price() -> None:
+    hourly = _day_prices()
+    quarters = np.repeat(hourly, 4)
+    by_hour = settle(optimal_curves(hourly[None, :], BATTERY), hourly, BATTERY, 50.0)
+    by_quarter = settle(
+        optimal_curves(quarters[None, :], BATTERY, dt=0.25), quarters, BATTERY, 50.0, dt=0.25
+    )
+    assert by_quarter["profit_eur"] == pytest.approx(by_hour["profit_eur"], abs=1e-3)
+    assert by_quarter["discharged_mwh"] == pytest.approx(by_hour["discharged_mwh"], abs=1e-4)
+
+
+def test_backtest_trades_hourly_then_quarter_hour_products() -> None:
+    index = pd.date_range("2025-09-01", "2025-10-31 23:45", freq="15min", tz="Europe/Paris")
+    rng = np.random.default_rng(4)
+    minutes = index.hour.to_numpy() * 60 + index.minute.to_numpy()
+    shape = 50 + 30 * np.sin((minutes / 60 - 13) / 24 * 2 * np.pi)
+    level = pd.Series(shape + rng.normal(0, 5, len(index)), index=index)
+    switch = index >= MTU_15MIN_START
+    actual = level.where(switch, level.resample("1h").transform("mean"))
+    predictions = pd.DataFrame({"good": shape}, index=index)
+    daily = backtest(actual, predictions, BATTERY, ["good"], "good", 10, 5, 50.0)
+    assert daily.index.min() < MTU_15MIN_START.tz_localize(None) <= daily.index.max()
+    profit = daily.xs("profit_eur", axis=1, level="metric")
+    assert (profit["perfect_foresight"] >= profit["schedule_good"] - 1e-6).all()

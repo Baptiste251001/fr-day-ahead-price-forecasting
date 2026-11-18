@@ -47,9 +47,11 @@ Since the switch to 15-minute products (36,644 quarter-hours, October 2025 to No
   training data.
 - **The 15-minute shape is predictable.** Quarters deviate from their hourly mean by
   7.6 €/MWh on average. The shape model cuts that error by 27%, to 5.5 €/MWh.
-- **In euros, better forecasts are worth less than MAE suggests.** A 1 MW / 2 MWh battery
-  bidding from the forecasts captures 86% of its perfect-foresight profit with price-quantity
-  bid curves, against 80% when it simply trusts the naive forecast.
+- **In euros, accuracy and value do not move together.** A 1 MW / 2 MWh battery bidding
+  from the forecasts captures 84% of its perfect-foresight profit with price-quantity bid
+  curves, against 78% when it trusts the naive forecast: the Lasso's 16% MAE gain is worth
+  only about 5 points. The reverse holds for the 15-minute shape: a 3% MAE gain, but 6.5
+  more points of captured profit since the switch.
 
 ![MAE by year](reports/figures/mae_by_year.png)
 
@@ -228,8 +230,9 @@ The two notebooks go further:
 
 A desk does not trade a forecast, it submits orders. `fr-power bid` replays the out-of-sample
 period as a small battery operator (1 MW / 2 MWh, 88% round-trip efficiency, empty at the
-start of each day) bidding on the day-ahead auction every day. The backtest still uses
-hourly orders and the hourly forecasts; moving it to 15-minute orders is the next step.
+start of each day) bidding on the day-ahead auction every day. Each day is traded at the
+resolution of its products: 24 hourly orders until 30 September 2025, 96 quarter-hour orders
+from 1 October 2025, built from the 15-minute forecasts.
 
 **Why a forecast matters for bidding.** A small, flexible generator should simply offer at
 its marginal cost, whatever the forecast. A battery is different: the value of charging at
@@ -242,40 +245,49 @@ day's price shape.
 |---|---|
 | `perfect_foresight` | Optimal schedule computed on the realized prices: the upper bound |
 | `schedule_<model>` | Optimal schedule on the model's point forecast, submitted as fixed quantities whatever the price |
-| `curves_ensemble` | One price-quantity curve per hour, optimized over 60 price scenarios: the ensemble forecast plus each of the previous 60 days' error vectors. A linear program maximizes the expected profit, with curves that are monotone in price (as SDAC orders must be) and a dispatch that is feasible in every scenario (Fleten & Pettersen, 2005) |
+| `schedule_ensemble_hourly_flat` | The same, on the ensemble's hourly forecast without the intra-hour shape: it prices the shape in euros |
+| `curves_ensemble` | One price-quantity curve per period (hour or quarter-hour), optimized over 60 price scenarios: the ensemble forecast plus each of the previous 60 days' error vectors. A linear program maximizes the expected profit, with curves that are monotone in price (as SDAC orders must be) and a dispatch that is feasible in every scenario (Fleten & Pettersen, 2005) |
 
-**Settlement.** Each hour's executed volume is read on its curve at the cleared price. If
+**Settlement.** Each period's executed volume is read on its curve at the cleared price. If
 the cleared prices fall outside the scenarios, the curves can commit the battery to sell
 energy it does not hold. It then delivers the closest feasible dispatch, and the gap is
 traded back at the day-ahead price plus a 50 €/MWh penalty (a proxy for the imbalance
 price). That dispatch only minimizes the gap, so the penalty can never be used to re-trade
 with hindsight.
 
-| Strategy | Profit (€/MW/year) | Share of perfect foresight | Cycles/day |
-|---|---:|---:|---:|
-| perfect_foresight | 76,300 | 100% | 1.81 |
-| schedule_naive | 61,400 | 80.4% | 1.81 |
-| schedule_lasso | 64,400 | 84.4% | 1.76 |
-| schedule_ensemble | 63,700 | 83.5% | 1.69 |
-| **curves_ensemble** | **65,300** | **85.6%** | 1.76 |
+| Strategy | Full period: €/MW/year | Share of perfect foresight | Since the switch: €/MW/year | Share of perfect foresight |
+|---|---:|---:|---:|---:|
+| perfect_foresight | 79,000 | 100% | 108,800 | 100% |
+| schedule_naive | 61,800 | 78.2% | 84,000 | 77.2% |
+| schedule_lasso | 65,400 | 82.8% | 91,200 | **83.8%** |
+| schedule_ensemble | 64,600 | 81.7% | 90,400 | 83.0% |
+| schedule_ensemble_hourly_flat | 63,300 | 80.1% | 83,300 | 76.5% |
+| **curves_ensemble** | **66,200** | **83.8%** | 91,100 | **83.8%** |
 
-2,085 delivery days (2021 to November 2026); per-year results are in
-`reports/bidding_by_year.csv`.
+Full period: 2,058 delivery days, January 2021 to November 2026. Since the switch: 378 days
+of quarter-hour orders, from the end of the shape model's first training window to November
+2026. Per-year results are in `reports/bidding_by_year.csv`.
 
 **What this shows**
 
 1. **Forecast accuracy is worth less than its MAE gain.** The Lasso cuts the naive error by
-   16%, but adds only 4 points of captured profit. A battery needs the *ranking* of the
+   16%, but adds under 5 points of captured profit. A battery needs the *ranking* of the
    hours (cheap midday, expensive evening), and the naive forecast already gets that ranking
    mostly right.
-2. **Bidding curves beat fixed quantities in every year.** Against the schedule built on the
-   same forecast, they earn 900 to 2,800 €/MW more per full year (700 in the partial year
-   2026). The gain comes from hours where the decision depends on the price: buy at night
-   only if the price is negative, or sell less in the morning if the price turns out low
-   (right panel below). On most hours the optimal curve is flat, and the battery trades the
-   same volume whatever the price.
-3. **The imbalance risk of curves is tiny.** Committed volumes the battery could not deliver
-   average 0.002 MWh/day.
+2. **The 15-minute shape is worth more than its MAE gain.** Since the switch, the same
+   ensemble with the intra-hour shape captures 83.0% of the perfect-foresight profit,
+   against 76.5% when its hourly forecast is repeated on the four quarters: about
+   7,000 €/MW per year. Quarter-hour orders let the battery trade *within* the hour (2.4
+   cycles a day instead of 1.8), and that only pays off if the forecast knows which quarters
+   are cheap.
+3. **Bidding curves beat fixed quantities in every year.** Against the schedule built on the
+   same forecast, they earn 850 to 2,800 €/MW more per full year (700 in the partial year
+   2026). The gain comes from periods where the decision depends on the price: buy only if
+   the price is negative, or sell only above a threshold (right panel below). On most
+   periods the optimal curve is flat, and the battery trades the same volume whatever the
+   price. Since the switch, curves on the ensemble match the Lasso's fixed schedule.
+4. **The imbalance risk of curves is tiny.** Committed volumes the battery could not deliver
+   average 0.002 MWh/day (0.004 with quarter-hour orders).
 
 ![Battery bidding backtest](reports/figures/bidding.png)
 
@@ -343,15 +355,15 @@ uv run mypy src
 - **No carbon price.** A free daily EU carbon (EUA) series exists only from late 2021, so
   the fuel-cost feature uses gas alone.
 - **A short 15-minute history.** The intra-hour shape is learned on about a year of
-  15-minute prices, and the hourly level carries most of the error. The bidding backtest
-  still trades hourly products.
+  15-minute prices, and the hourly level carries most of the error.
 - **Simplified LEAR.** A full LEAR uses 24 hourly models and a variance-stabilizing
   transform (e.g. asinh) of prices.
 - **Untuned hyperparameters.** No search was run inside the walk-forward loop.
 - **A stylized battery.** It is a price-taker that only trades the day-ahead auction, with no
   intraday re-optimization, ancillary services, degradation cost, cycle limit or exchange
   fees, and it is empty at the start of every day. Real French batteries earn much of their
-  revenue from frequency reserves and run fewer cycles than 1.8 per day.
+  revenue from frequency reserves and run fewer cycles than the 1.9 a day used here (2.4
+  to 2.6 with quarter-hour orders).
 
 ## License
 
