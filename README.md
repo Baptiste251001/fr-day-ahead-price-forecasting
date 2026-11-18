@@ -168,7 +168,7 @@ notebooks/                  data exploration and forecast evaluation
 reports/                    metrics tables and figures produced by `train`
 ```
 
-Development checks (also run as pre-commit hooks):
+Development checks (ruff and mypy also run as pre-commit hooks):
 
 ```bash
 uv run pytest
