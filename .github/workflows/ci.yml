@@ -34,6 +34,3 @@ jobs:
 
       - name: Test (pytest)
         run: uv run pytest --cov=fr_power --cov-report=term-missing
-        env:
-          # CI never hits live data providers; tests must mock all network calls.
-          ENTSOE_API_TOKEN: "dummy-token-for-ci"

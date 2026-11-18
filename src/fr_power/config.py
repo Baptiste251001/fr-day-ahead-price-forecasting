@@ -1,50 +1,17 @@
-"""Typed configuration for the fr_power pipeline, loaded from YAML.
-
-All pipeline stages take a `Config` instance rather than reading files or
-environment variables directly, so a run is fully reproducible from a single
-YAML file plus a `.env`.
-"""
+"""Typed configuration, loaded from a single YAML file (`configs/default.yaml`)."""
 
 from __future__ import annotations
 
 import datetime as dt
-import os
 from pathlib import Path
-from typing import Literal
 
 import yaml
-from dotenv import load_dotenv
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "default.yaml"
 
 
-class ProjectConfig(BaseModel):
-    name: str
-    random_seed: int
-    timezone: str
-
-
-class MarketConfig(BaseModel):
-    bidding_zone: str
-    eic_code: str
-    currency: str
-
-
-class EntsoeSeriesConfig(BaseModel):
-    day_ahead_prices: bool
-    day_ahead_wind_solar_forecast: bool
-    day_ahead_load_forecast: bool
-    actual_generation_by_type: bool
-    cross_border_flows: bool
-
-
-class IntradaySourceConfig(BaseModel):
-    source: Literal["csv", "stub"]
-    path: str
-
-
-class WeatherCity(BaseModel):
+class City(BaseModel):
     name: str
     lat: float
     lon: float
@@ -52,201 +19,84 @@ class WeatherCity(BaseModel):
 
 
 class WeatherConfig(BaseModel):
-    enabled: bool
-    provider: str
-    cities: list[WeatherCity]
+    cities: list[City]
     hdd_base_celsius: float
     cdd_base_celsius: float
 
     @field_validator("cities")
     @classmethod
-    def weights_sum_to_one(cls, cities: list[WeatherCity]) -> list[WeatherCity]:
+    def weights_sum_to_one(cls, cities: list[City]) -> list[City]:
         total = sum(c.weight for c in cities)
-        if not (0.99 <= total <= 1.01):
+        if not 0.99 <= total <= 1.01:
             raise ValueError(f"City weights must sum to ~1.0, got {total}")
         return cities
 
 
-class RteEco2mixConfig(BaseModel):
-    enabled: bool
-
-
 class DataConfig(BaseModel):
     start_date: dt.date
-    end_date: str  # "today" resolved lazily; see `resolved_end_date`
-    # When end_date == "today", how many days to pull back from the current date before
-    # querying. ENTSO-E's day-ahead-price endpoint (and entsoe-py's own +1-day padding
-    # around it) can 400 if asked for a period extending past the last cleared auction,
-    # and Open-Meteo's historical archive similarly lags a day or two behind real time --
-    # so "today" as a literal upper bound is unsafe for any of these live sources. Only
-    # applies to the "today" sentinel; an explicit end_date is respected exactly.
-    end_date_safety_margin_days: int = Field(default=2, ge=0)
-    raw_dir: str
-    interim_dir: str
-    processed_dir: str
-    cache_format: Literal["parquet"]
-    entsoe: EntsoeSeriesConfig
-    intraday: IntradaySourceConfig
+    # ISO date, or "today" (resolved to today minus `end_date_margin_days`: ENTSO-E 400s
+    # on a range past the last cleared auction and Open-Meteo's archive lags ~2 days).
+    end_date: str = "today"
+    end_date_margin_days: int = Field(default=2, ge=0)
+    raw_dir: Path = Path("data/raw")
+    processed_dir: Path = Path("data/processed")
     weather: WeatherConfig
-    rte_eco2mix: RteEco2mixConfig
 
     def resolved_end_date(self) -> dt.date:
         if self.end_date == "today":
-            return dt.datetime.now(dt.UTC).date() - dt.timedelta(
-                days=self.end_date_safety_margin_days
-            )
+            return dt.date.today() - dt.timedelta(days=self.end_date_margin_days)
         return dt.date.fromisoformat(self.end_date)
 
 
-class CostsConfig(BaseModel):
-    fee_eur_per_mwh: float = Field(ge=0)
-    half_spread_eur_per_mwh: float = Field(ge=0)
+class FeaturesConfig(BaseModel):
+    price_lags_hours: list[int] = [24, 48, 168]
+    price_rolling_windows_hours: list[int] = [24, 168]
+    realized_lag_hours: int = Field(default=48, ge=48)
+
+    @field_validator("price_lags_hours", "price_rolling_windows_hours")
+    @classmethod
+    def at_least_one_day(cls, values: list[int]) -> list[int]:
+        # Prices of delivery day D all come out of the same auction, so nothing from day D
+        # itself may be used: lags must reach back at least 24h.
+        if any(v < 24 for v in values):
+            raise ValueError(f"Price lags/windows must be >= 24h, got {values}")
+        return values
 
 
 class WalkForwardConfig(BaseModel):
     initial_train_days: int = Field(gt=0)
     retrain_every_days: int = Field(gt=0)
-    test_window_days: int = Field(gt=0)
 
 
-class BlockBootstrapConfig(BaseModel):
-    block_length_days: int = Field(gt=0)
-    n_resamples: int = Field(gt=0)
-    confidence_level: float = Field(gt=0, lt=1)
-
-
-class BacktestConfig(BaseModel):
-    walk_forward: WalkForwardConfig
-    no_trade_band_eur_per_mwh: float = Field(ge=0)
-    max_position_mwh: float = Field(gt=0)
-    block_bootstrap: BlockBootstrapConfig
-    cost_sensitivity_multipliers: list[float]
-    # Which Phase 3 forecast model's OOS predictions supply the directional/magnitude
-    # confirmation signal (see backtest/engine.py); the others still get backtested for
-    # comparison, but this is the model treated as "the" combined strategy for the
-    # bootstrap CI and cost-sensitivity sweep.
-    signal_model: Literal["naive", "lear", "lightgbm", "lstm"] = "lightgbm"
-
-
-class NaiveModelConfig(BaseModel):
-    lag_hours: int = Field(gt=0)
-
-
-class LearModelConfig(BaseModel):
-    lags_days: list[int]
-    lasso_alpha_grid: list[float]
+class LassoConfig(BaseModel):
+    alpha_grid: list[float]
     cv_folds: int = Field(gt=1)
 
 
-class LightgbmModelConfig(BaseModel):
+class LightGBMConfig(BaseModel):
     n_estimators: int
     learning_rate: float
     num_leaves: int
-    max_depth: int
     min_child_samples: int
     subsample: float
     colsample_bytree: float
     early_stopping_rounds: int
 
 
-class LstmModelConfig(BaseModel):
-    sequence_length_hours: int
-    hidden_size: int
-    num_layers: int
-    dropout: float
-    batch_size: int
-    learning_rate: float
-    max_epochs: int
-    early_stopping_patience: int
-    quantiles: list[float]
-
-
 class ModelsConfig(BaseModel):
-    naive: NaiveModelConfig
-    lear: LearModelConfig
-    lightgbm: LightgbmModelConfig
-    lstm: LstmModelConfig
-
-
-class FeaturesConfig(BaseModel):
-    price_lags_hours: list[int]
-    price_rolling_windows_hours: list[int]
-    spread_lags_hours: list[int]
-    generation_availability_lag_hours: int = Field(gt=0)
-    weather_availability_lag_hours: int = Field(gt=0)
-
-
-class OuEstimationConfig(BaseModel):
-    method: Literal["ols", "mle"]
-    min_observations: int = Field(gt=1)
-
-
-class OuOptimalStoppingConfig(BaseModel):
-    entry_z_score: float = Field(gt=0)
-    exit_z_score: float = Field(ge=0)
-    no_trade_z_score: float = Field(ge=0)
-    max_holding_hours: int = Field(gt=0)
-
-    @model_validator(mode="after")
-    def thresholds_are_ordered(self) -> OuOptimalStoppingConfig:
-        if not (self.no_trade_z_score <= self.exit_z_score <= self.entry_z_score):
-            raise ValueError(
-                "OU optimal-stopping thresholds must satisfy "
-                "no_trade_z_score <= exit_z_score <= entry_z_score, got "
-                f"{self.no_trade_z_score} <= {self.exit_z_score} <= {self.entry_z_score}"
-            )
-        return self
-
-
-class OuConfig(BaseModel):
-    estimation: OuEstimationConfig
-    optimal_stopping: OuOptimalStoppingConfig
-
-
-class LoggingConfig(BaseModel):
-    level: str = "INFO"
+    lasso: LassoConfig
+    lightgbm: LightGBMConfig
 
 
 class Config(BaseModel):
-    """Root configuration object for a pipeline run."""
-
-    project: ProjectConfig
-    market: MarketConfig
+    random_seed: int = 42
+    reports_dir: Path = Path("reports")
     data: DataConfig
-    costs: CostsConfig
-    backtest: BacktestConfig
+    features: FeaturesConfig = FeaturesConfig()
+    walk_forward: WalkForwardConfig
     models: ModelsConfig
-    features: FeaturesConfig
-    ou: OuConfig
-    logging: LoggingConfig
-
-
-class Secrets(BaseModel):
-    """API credentials, loaded from environment variables (via `.env`)."""
-
-    entsoe_api_token: str | None = None
-    rte_client_id: str | None = None
-    rte_client_secret: str | None = None
-    weather_api_key: str | None = None
-
-    @classmethod
-    def from_env(cls) -> Secrets:
-        return cls(
-            entsoe_api_token=os.environ.get("ENTSOE_API_TOKEN") or None,
-            rte_client_id=os.environ.get("RTE_CLIENT_ID") or None,
-            rte_client_secret=os.environ.get("RTE_CLIENT_SECRET") or None,
-            weather_api_key=os.environ.get("WEATHER_API_KEY") or None,
-        )
 
 
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
-    """Load and validate a YAML config file into a `Config` object."""
-    with Path(path).open("r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f)
-    return Config.model_validate(raw)
-
-
-def load_secrets(env_file: str | Path | None = None) -> Secrets:
-    """Load API credentials from a `.env` file (if present) and the environment."""
-    load_dotenv(dotenv_path=env_file, override=False)
-    return Secrets.from_env()
+    with Path(path).open(encoding="utf-8") as f:
+        return Config.model_validate(yaml.safe_load(f))

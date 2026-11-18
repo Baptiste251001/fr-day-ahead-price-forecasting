@@ -1,0 +1,4 @@
+model,mae,rmse,median_ae,rmae_vs_naive
+naive,29.409,53.231,16.93,1.0
+lasso,22.901,40.09,14.992,0.779
+lightgbm,32.455,58.684,17.206,1.104

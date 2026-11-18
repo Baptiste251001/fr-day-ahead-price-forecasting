@@ -1,32 +1,28 @@
 [project]
-name = "fr-power-spread-ou"
-version = "0.1.0"
-description = "Intraday vs day-ahead electricity price spread forecasting and OU-based optimal-stopping trading for the French power market."
+name = "fr-power"
+version = "1.0.0"
+description = "Walk-forward forecasting of French day-ahead electricity prices from ENTSO-E data."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "Baptiste Millard" }]
+authors = [{ name = "Baptiste Malard" }]
 
 dependencies = [
     "pandas>=2.2,<3.0",
     "numpy>=1.26,<3.0",
     "scipy>=1.12,<2.0",
-    "statsmodels>=0.14,<0.15",
     "scikit-learn>=1.4,<2.0",
-    "lightgbm>=4.3,<5.0",
-    "torch>=2.2,<3.0",
+    "lightgbm>=4.7,<5.0",
     "entsoe-py>=0.6.5,<0.7",
     "pydantic>=2.6,<3.0",
-    "pydantic-settings>=2.2,<3.0",
     "pyyaml>=6.0,<7.0",
     "typer>=0.12,<0.13",
-    "click>=8.1,<8.2",  # typer 0.12 is incompatible with click>=8.2's Parameter.make_metavar signature
+    "click>=8.1,<8.2",  # typer 0.12 breaks with click>=8.2
     "python-dotenv>=1.0,<2.0",
     "pyarrow>=16.0,<21.0",
     "matplotlib>=3.8,<4.0",
     "holidays>=0.47,<1.0",
     "requests>=2.31,<3.0",
-    "tqdm>=4.66,<5.0",
 ]
 
 [project.optional-dependencies]
@@ -42,7 +38,6 @@ dev = [
 notebooks = [
     "jupyterlab>=4.1,<5.0",
     "ipykernel>=6.29,<7.0",
-    "plotly>=5.20,<6.0",
 ]
 
 [project.scripts]
@@ -62,10 +57,7 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "N"]
-# E501: line length is handled by ruff format.
-# N803/N806: `X`/`X_train`/etc. is the standard scikit-learn convention for a
-# feature matrix and is used throughout fr_power.models -- renaming it to
-# lowercase would fight established ML convention rather than improve clarity.
+# E501 is handled by ruff format; N803/N806 allow the scikit-learn `X` convention.
 ignore = ["E501", "N803", "N806"]
 
 [tool.ruff.lint.isort]

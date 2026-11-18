@@ -1,0 +1,74 @@
+"""Forecast accuracy metrics and the Diebold-Mariano test.
+
+All comparisons are made on the rows where *every* model has a prediction, so that no
+model is flattered by being scored on an easier subset of hours.
+"""
+
+from __future__ import annotations
+
+from itertools import combinations
+
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+
+def common_rows(actual: pd.Series, predictions: pd.DataFrame) -> pd.DataFrame:
+    """Actual (column `actual`) and predictions, restricted to fully-observed rows."""
+    return pd.concat([actual.rename("actual"), predictions], axis=1).dropna()
+
+
+def point_metrics(actual: pd.Series, predictions: pd.DataFrame) -> pd.DataFrame:
+    """MAE, RMSE, median absolute error and MAE relative to the naive model (rMAE)."""
+    df = common_rows(actual, predictions)
+    errors = df[predictions.columns].sub(df["actual"], axis=0)
+    out = pd.DataFrame(
+        {
+            "mae": errors.abs().mean(),
+            "rmse": np.sqrt((errors**2).mean()),
+            "median_ae": errors.abs().median(),
+        }
+    )
+    if "naive" in out.index:
+        out["rmae_vs_naive"] = out["mae"] / out.loc["naive", "mae"]
+    out.attrs["n_hours"] = len(df)
+    return out
+
+
+def mae_by_year(actual: pd.Series, predictions: pd.DataFrame, min_days: int = 30) -> pd.DataFrame:
+    """MAE per calendar year, skipping years with fewer than `min_days` scored days."""
+    df = common_rows(actual, predictions)
+    errors = df[predictions.columns].sub(df["actual"], axis=0).abs()
+    by_year = errors.groupby(errors.index.year)
+    return by_year.mean()[by_year.size() >= min_days * 24].rename_axis("year")
+
+
+def diebold_mariano(
+    actual: pd.Series, pred_a: pd.Series, pred_b: pd.Series, power: int = 1
+) -> tuple[float, float]:
+    """DM test of equal accuracy between forecasts A and B.
+
+    The 24 hourly forecasts of a day are issued together, so their errors are strongly
+    correlated. Following common EPF practice, the loss differential is first averaged per
+    delivery day, and the test is run on that daily series. `power=1` uses absolute
+    errors, `power=2` squared errors.
+
+    Returns (statistic, two-sided p-value). A negative statistic means A is more accurate.
+    """
+    df = pd.concat([actual, pred_a, pred_b], axis=1, keys=["y", "a", "b"]).dropna()
+    loss_diff = (df["y"] - df["a"]).abs() ** power - (df["y"] - df["b"]).abs() ** power
+    daily = loss_diff.groupby(loss_diff.index.date).mean().to_numpy()
+    if len(daily) < 2 or daily.std(ddof=1) == 0:
+        return 0.0, 1.0
+    stat = daily.mean() / (daily.std(ddof=1) / np.sqrt(len(daily)))
+    return float(stat), float(2 * stats.norm.sf(abs(stat)))
+
+
+def dm_table(actual: pd.Series, predictions: pd.DataFrame) -> pd.DataFrame:
+    """Pairwise DM tests (absolute loss) between every pair of models."""
+    df = common_rows(actual, predictions)
+    rows = []
+    for a, b in combinations(predictions.columns, 2):
+        stat, p = diebold_mariano(df["actual"], df[a], df[b])
+        rows.append({"model_a": a, "model_b": b, "dm_stat": stat, "p_value": p})
+    return pd.DataFrame(rows)

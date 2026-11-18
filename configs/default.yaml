@@ -1,151 +1,47 @@
-# Default configuration for the FR power intraday/day-ahead spread project.
-# All dates are inclusive, ISO format, interpreted in Europe/Paris local time
-# unless noted otherwise. This file is the single source of truth for a run;
-# override individual keys with CLI flags or a copy of this file for
-# experiments, never hardcode values in code.
+# Single source of truth for a pipeline run. Copy this file to run an experiment:
+#   fr-power train --config configs/my_experiment.yaml
 
-project:
-  name: fr-power-spread-ou
-  random_seed: 42
-  timezone: "Europe/Paris"
-
-market:
-  bidding_zone: "FR"
-  # ENTSO-E area EIC code for the FR bidding zone (day-ahead / intraday FR domain).
-  eic_code: "10YFR-RTE------C"
-  currency: "EUR"
+random_seed: 42
+reports_dir: reports
 
 data:
   start_date: "2019-01-01"
-  end_date: "today"  # resolved at runtime to current UTC date minus end_date_safety_margin_days
-  # ENTSO-E day-ahead prices and Open-Meteo's historical archive both lag a day or two
-  # behind real time; "today" as a literal upper bound risks a 400 for not-yet-cleared
-  # auctions. See Config.data.resolved_end_date.
-  end_date_safety_margin_days: 2
-  raw_dir: "data/raw"
-  interim_dir: "data/interim"
-  processed_dir: "data/processed"
-  cache_format: "parquet"
-
-  entsoe:
-    # Series pulled from ENTSO-E Transparency for FR.
-    day_ahead_prices: true
-    day_ahead_wind_solar_forecast: true
-    day_ahead_load_forecast: true
-    actual_generation_by_type: true
-    # Off by default: a live run found ENTSO-E's FR net-position feed discontinued
-    # from 2025-09-30 onward. With it required, LEAR/LSTM (which need complete rows)
-    # would produce zero predictions for the entire recent tail of the dataset --
-    # the most relevant period. build_feature_matrix treats it as optional; enable
-    # this only for a deliberately pre-2025-10 backtest.
-    cross_border_flows: false
-
-  intraday:
-    # No free, granular EPEX ID3/ID1 index is bundled by default.
-    # Set `source` to "csv" and point `path` at a local drop-in file to enable
-    # true intraday-vs-day-ahead spread modelling; otherwise the pipeline
-    # degrades to a day-ahead-price forecasting task and logs a loud warning.
-    source: "csv"   # one of: "csv", "stub"
-    path: "data/raw/intraday_fr.parquet"
-
+  end_date: "today"            # or an ISO date; "today" = today minus end_date_margin_days
+  end_date_margin_days: 2
+  raw_dir: data/raw
+  processed_dir: data/processed
   weather:
-    enabled: true
-    provider: "open-meteo"
-    # Population-weighted basket of French cities used to build national
-    # HDD/CDD proxies (demand is strongly thermosensitive in France).
+    # Population-weighted basket of French cities -> national temperature, HDD and CDD
+    # (French demand is strongly temperature-sensitive because of electric heating).
     cities:
-      - { name: "Paris", lat: 48.8566, lon: 2.3522, weight: 0.35 }
-      - { name: "Lyon", lat: 45.7640, lon: 4.8357, weight: 0.15 }
-      - { name: "Marseille", lat: 43.2965, lon: 5.3698, weight: 0.13 }
-      - { name: "Toulouse", lat: 43.6047, lon: 1.4442, weight: 0.10 }
-      - { name: "Lille", lat: 50.6292, lon: 3.0573, weight: 0.10 }
-      - { name: "Nantes", lat: 47.2184, lon: -1.5536, weight: 0.09 }
-      - { name: "Strasbourg", lat: 48.5734, lon: 7.7521, weight: 0.08 }
+      - { name: Paris,      lat: 48.8566, lon:  2.3522, weight: 0.35 }
+      - { name: Lyon,       lat: 45.7640, lon:  4.8357, weight: 0.15 }
+      - { name: Marseille,  lat: 43.2965, lon:  5.3698, weight: 0.13 }
+      - { name: Toulouse,   lat: 43.6047, lon:  1.4442, weight: 0.10 }
+      - { name: Lille,      lat: 50.6292, lon:  3.0573, weight: 0.10 }
+      - { name: Nantes,     lat: 47.2184, lon: -1.5536, weight: 0.09 }
+      - { name: Strasbourg, lat: 48.5734, lon:  7.7521, weight: 0.08 }
     hdd_base_celsius: 15.5
     cdd_base_celsius: 18.0
 
-  rte_eco2mix:
-    enabled: false  # optional enrichment, requires RTE_CLIENT_ID/SECRET
+features:
+  price_lags_hours: [24, 48, 168]       # must be >= 24 (day D prices are unknown)
+  price_rolling_windows_hours: [24, 168]
+  realized_lag_hours: 48                # lag for realized generation and weather (>= 48)
 
-costs:
-  # Applied symmetrically on entry and exit; expressed per MWh.
-  fee_eur_per_mwh: 0.15
-  half_spread_eur_per_mwh: 0.50
-
-backtest:
-  walk_forward:
-    initial_train_days: 730       # 2 years warm-up before first out-of-sample day
-    retrain_every_days: 30        # periodic retraining cadence
-    test_window_days: 30
-  no_trade_band_eur_per_mwh: 1.0
-  max_position_mwh: 1.0
-  block_bootstrap:
-    block_length_days: 7
-    n_resamples: 2000
-    confidence_level: 0.95
-  cost_sensitivity_multipliers: [0.0, 0.5, 1.0, 1.5, 2.0, 3.0]
-  # Which Phase 3 model's forecast supplies directional/magnitude confirmation for
-  # the combined OU + ML strategy (see src/fr_power/backtest/engine.py).
-  signal_model: "lightgbm"
+walk_forward:
+  initial_train_days: 730   # two years of history before the first out-of-sample day
+  retrain_every_days: 30    # refit every month, predict the following month
 
 models:
-  naive:
-    lag_hours: 168  # same hour, previous week
-
-  lear:
-    lags_days: [1, 2, 3, 7]
-    lasso_alpha_grid: [0.0001, 0.001, 0.01, 0.1, 1.0]
+  lasso:
+    alpha_grid: [0.001, 0.01, 0.1, 1.0]
     cv_folds: 5
-
   lightgbm:
-    n_estimators: 500
+    n_estimators: 1000
     learning_rate: 0.03
     num_leaves: 31
-    max_depth: -1
     min_child_samples: 20
     subsample: 0.8
     colsample_bytree: 0.8
     early_stopping_rounds: 50
-
-  lstm:
-    sequence_length_hours: 168
-    hidden_size: 64
-    num_layers: 2
-    dropout: 0.2
-    batch_size: 64
-    learning_rate: 0.001
-    max_epochs: 100
-    early_stopping_patience: 10
-    quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
-
-features:
-  # Autoregressive structure on the day-ahead price and (when available)
-  # the intraday-vs-day-ahead spread. All lags/windows are in hourly
-  # delivery periods and always look strictly backward from the delivery
-  # hour, never forward.
-  price_lags_hours: [24, 48, 168]
-  price_rolling_windows_hours: [24, 168]
-  spread_lags_hours: [24, 168]
-  # Realized (not day-ahead-forecast) series -- actual generation by type
-  # and actual weather -- are not known for delivery day D at the ~13:00
-  # D-1 decision point. They are shifted forward by this many hours so
-  # only what is knowable at decision time is used. See
-  # src/fr_power/features/build.py module docstring for the full
-  # information-timeline rationale.
-  generation_availability_lag_hours: 24
-  weather_availability_lag_hours: 24
-
-ou:
-  estimation:
-    method: "ols"  # "ols" or "mle"
-    min_observations: 20
-  optimal_stopping:
-    # Three-tier hysteresis band, ordered no_trade_z <= exit_z <= entry_z; see
-    # src/fr_power/ou/optimal_stopping.py module docstring for the full rationale.
-    no_trade_z_score: 0.1   # |z| below this: dead zone, never open; force-close if open
-    exit_z_score: 0.3       # an open position is closed once |z| reverts into this band
-    entry_z_score: 1.0      # a flat position is opened once |z| reaches this band
-    max_holding_hours: 6
-
-logging:
-  level: "INFO"

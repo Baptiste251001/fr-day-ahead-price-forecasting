@@ -1,3 +1,3 @@
-"""fr_power: intraday vs day-ahead spread forecasting and OU trading for the French power market."""
+"""fr_power: walk-forward forecasting of French day-ahead electricity prices."""
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
