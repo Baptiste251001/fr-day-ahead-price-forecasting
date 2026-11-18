@@ -50,3 +50,11 @@ def test_commands_fail_cleanly_without_inputs(config: Config, tmp_path: Path) ->
         result = runner.invoke(app, [command, "-c", str(config_path)])
         assert result.exit_code == 1
         assert "ERROR" in result.output
+
+
+def test_experiment_config_extends_the_default() -> None:
+    cfg = load_config(DEFAULT_CONFIG_PATH.parent / "nwp.yaml")
+    default = load_config(DEFAULT_CONFIG_PATH)
+    assert cfg.features.weather_forecasts and not default.features.weather_forecasts
+    assert cfg.models == default.models  # inherited untouched
+    assert cfg.data.weather_forecast == default.data.weather_forecast

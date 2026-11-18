@@ -1,0 +1,17 @@
+# Experiment: add archived NWP weather forecasts (temperature, 100 m wind, solar radiation)
+# issued two days ahead. Open-Meteo's archive only holds wind and solar forecasts from
+# mid-February 2024, so this run uses a shorter history: one year of training before the
+# first out-of-sample day (March 2025 onwards).
+extends: default.yaml
+
+reports_dir: reports/nwp
+
+data:
+  start_date: "2024-02-20"
+  processed_dir: data/processed/nwp
+
+features:
+  weather_forecasts: true
+
+walk_forward:
+  initial_train_days: 365

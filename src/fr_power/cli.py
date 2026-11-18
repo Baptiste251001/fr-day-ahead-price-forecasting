@@ -33,7 +33,7 @@ def fetch(
     config: Path = ConfigOption,
     force_refresh: bool = typer.Option(False, help="Re-download even if cached."),
 ) -> None:
-    """Download ENTSO-E and Open-Meteo data to data/raw/ (cached as parquet)."""
+    """Download ENTSO-E, Open-Meteo and gas-price data to data/raw/ (cached as parquet)."""
     cfg = _load(config)
     start, end = cfg.data.start_date, cfg.data.resolved_end_date()
     try:
@@ -49,12 +49,17 @@ def fetch(
         cfg.data.raw_dir,
         force_refresh=force_refresh,
     )
-    results[data.WEATHER] = data.cached_fetch(
-        cfg.data.raw_dir,
-        data.WEATHER,
-        lambda: data.fetch_weather(cfg.data.weather, str(start), str(end)),
-        force_refresh=force_refresh,
-    )
+    other_sources = {
+        data.WEATHER: lambda: data.fetch_weather(cfg.data.weather, str(start), str(end)),
+        data.WEATHER_FORECAST: lambda: data.fetch_weather_forecast(
+            cfg.data.weather_forecast, cfg.data.weather, str(start), str(end)
+        ),
+        data.GAS: lambda: data.fetch_gas(cfg.data.gas_ticker, str(start), str(end)),
+    }
+    for name, fetch_fn in other_sources.items():
+        results[name] = data.cached_fetch(
+            cfg.data.raw_dir, name, fetch_fn, force_refresh=force_refresh
+        )
     for name, df in results.items():
         typer.echo(f"  {name}: {len(df):,} rows, {df.index.min()} -> {df.index.max()}")
 

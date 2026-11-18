@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -32,6 +33,14 @@ class WeatherConfig(BaseModel):
         return cities
 
 
+class WeatherForecastConfig(BaseModel):
+    """Archived NWP forecasts (Open-Meteo previous-runs API), issued `lead_days` before."""
+
+    lead_days: int = Field(default=2, ge=2)  # runs of day D-1 may finish after the gate
+    wind_points: list[City]
+    solar_points: list[City]
+
+
 class DataConfig(BaseModel):
     start_date: dt.date
     # ISO date, or "today" (resolved to today minus `end_date_margin_days`: ENTSO-E 400s
@@ -41,6 +50,8 @@ class DataConfig(BaseModel):
     raw_dir: Path = Path("data/raw")
     processed_dir: Path = Path("data/processed")
     weather: WeatherConfig
+    weather_forecast: WeatherForecastConfig
+    gas_ticker: str = "TTF=F"  # Yahoo Finance: Dutch TTF natural gas, front month, EUR/MWh
 
     def resolved_end_date(self) -> dt.date:
         if self.end_date == "today":
@@ -52,6 +63,8 @@ class FeaturesConfig(BaseModel):
     price_lags_hours: list[int] = [24, 48, 168]
     price_rolling_windows_hours: list[int] = [24, 168]
     realized_lag_hours: int = Field(default=48, ge=48)
+    gas_plant_efficiency: float = Field(default=0.52, gt=0, le=1)
+    weather_forecasts: bool = False  # NWP archive only exists from early 2024
 
     @field_validator("price_lags_hours", "price_rolling_windows_hours")
     @classmethod
@@ -97,6 +110,24 @@ class Config(BaseModel):
     models: ModelsConfig
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _read_yaml(path: Path) -> dict[str, Any]:
+    """Read a YAML config; `extends: other.yaml` inherits from a file in the same folder."""
+    with path.open(encoding="utf-8") as f:
+        raw: dict[str, Any] = yaml.safe_load(f)
+    if parent := raw.pop("extends", None):
+        raw = _deep_merge(_read_yaml(path.parent / parent), raw)
+    return raw
+
+
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
-    with Path(path).open(encoding="utf-8") as f:
-        return Config.model_validate(yaml.safe_load(f))
+    return Config.model_validate(_read_yaml(Path(path)))

@@ -37,6 +37,38 @@ def test_features_ignore_prices_of_the_delivery_day(raw: dict[str, pd.DataFrame]
     assert (after.loc[DAY, TARGET] - before.loc[DAY, TARGET]) == pytest.approx(1_000.0)
 
 
+def test_wind_solar_forecasts_for_the_delivery_day_are_not_used(
+    raw: dict[str, pd.DataFrame],
+) -> None:
+    """The TSO's wind/solar forecasts for day D are published only after the gate."""
+    before = build_feature_matrix(raw, CONFIG)
+    raw[data.WIND_SOLAR_FORECAST] = _perturb(
+        raw[data.WIND_SOLAR_FORECAST], DAY, DAY + pd.Timedelta(days=1)
+    )
+    after = build_feature_matrix(raw, CONFIG)
+
+    pd.testing.assert_frame_equal(_day_rows(before, DAY), _day_rows(after, DAY))
+
+
+def test_gas_price_uses_closes_of_d_minus_2_or_earlier(raw: dict[str, pd.DataFrame]) -> None:
+    before = build_feature_matrix(raw, CONFIG)
+    raw[data.GAS] = _perturb(raw[data.GAS], DAY - pd.Timedelta(days=1), DAY + pd.Timedelta(days=1))
+    after = build_feature_matrix(raw, CONFIG)
+    pd.testing.assert_frame_equal(_day_rows(before, DAY), _day_rows(after, DAY))
+
+    # DAY is a Saturday: the last close known on D-1 (Friday) morning is Thursday's.
+    thursday = (DAY - pd.Timedelta(days=2)).tz_localize(None)
+    expected = raw[data.GAS].loc[thursday, "gas_close_eur_mwh"] / CONFIG.gas_plant_efficiency
+    assert (before.loc[DAY : DAY + pd.Timedelta(hours=23), "gas_cost_eur_mwh"] == expected).all()
+
+
+def test_weather_forecast_features_are_optional(raw: dict[str, pd.DataFrame]) -> None:
+    without = build_feature_matrix(raw, CONFIG)
+    with_nwp = build_feature_matrix(raw, FeaturesConfig(weather_forecasts=True))
+    assert not any(c.startswith("nwp_") for c in without.columns)
+    assert {"nwp_temperature_c", "nwp_wind_speed_100m_kmh"} <= set(with_nwp.columns)
+
+
 @pytest.mark.parametrize("dataset", [data.GENERATION, data.WEATHER])
 def test_realized_data_from_d_minus_1_is_not_used(
     raw: dict[str, pd.DataFrame], dataset: str

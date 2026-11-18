@@ -34,6 +34,10 @@ def make_raw(days: int = 60, seed: int = 0) -> dict[str, pd.DataFrame]:
 
     days_index = pd.date_range("2024-01-01", periods=days, freq="D")
     temperature = 8 + rng.normal(0, 3, days)
+    gas = pd.DataFrame(  # trading days only, as on an exchange
+        {"gas_close_eur_mwh": 30 + rng.normal(0, 2, days)}, index=days_index
+    )
+    gas = gas[gas.index.dayofweek < 5]
     return {
         data.DA_PRICES: pd.DataFrame({"day_ahead_price_eur_mwh": price}, index=hourly),
         data.LOAD_FORECAST: load_df,
@@ -45,6 +49,15 @@ def make_raw(days: int = 60, seed: int = 0) -> dict[str, pd.DataFrame]:
             {"temperature_c": temperature, "hdd": 15.5 - temperature, "cdd": 0.0},
             index=days_index,
         ),
+        data.WEATHER_FORECAST: pd.DataFrame(
+            {
+                "nwp_temperature_c": 8 + rng.normal(0, 3, n),
+                "nwp_wind_speed_100m_kmh": 20 + rng.normal(0, 5, n),
+                "nwp_solar_radiation_wm2": solar / 20,
+            },
+            index=hourly,
+        ),
+        data.GAS: gas,
     }
 
 
@@ -67,6 +80,10 @@ def config(tmp_path) -> Config:  # type: ignore[no-untyped-def]
                     "cities": [{"name": "Paris", "lat": 48.9, "lon": 2.4, "weight": 1.0}],
                     "hdd_base_celsius": 15.5,
                     "cdd_base_celsius": 18.0,
+                },
+                "weather_forecast": {
+                    "wind_points": [{"name": "W", "lat": 50.0, "lon": 3.0, "weight": 1.0}],
+                    "solar_points": [{"name": "S", "lat": 44.0, "lon": 0.0, "weight": 1.0}],
                 },
             },
             "walk_forward": {"initial_train_days": 30, "retrain_every_days": 10},

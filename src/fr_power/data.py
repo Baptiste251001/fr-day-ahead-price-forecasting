@@ -7,7 +7,9 @@ Series pulled for the FR bidding zone:
   * day-ahead auction price (the forecasting target),
   * day-ahead load forecast and day-ahead wind & solar forecast (known before the auction),
   * actual generation by production type (realized, so only used with a lag),
-  * daily population-weighted temperature for a basket of French cities (Open-Meteo).
+  * daily population-weighted temperature for a basket of French cities (Open-Meteo),
+  * archived weather *forecasts* issued two days ahead (Open-Meteo previous-runs API),
+  * daily closes of the Dutch TTF natural-gas front-month future (Yahoo Finance).
 """
 
 from __future__ import annotations
@@ -22,13 +24,15 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-from fr_power.config import WeatherConfig
+from fr_power.config import City, WeatherConfig, WeatherForecastConfig
 
 logger = logging.getLogger(__name__)
 
 COUNTRY_CODE = "FR"
 TIMEZONE = "Europe/Paris"
 OPEN_METEO_URL = "https://archive-api.open-meteo.com/v1/archive"
+PREVIOUS_RUNS_URL = "https://previous-runs-api.open-meteo.com/v1/forecast"
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
 
 # Cache file name (without .parquet) for each raw dataset.
 DA_PRICES = "entsoe_day_ahead_prices"
@@ -36,7 +40,17 @@ LOAD_FORECAST = "entsoe_day_ahead_load_forecast"
 WIND_SOLAR_FORECAST = "entsoe_day_ahead_wind_solar_forecast"
 GENERATION = "entsoe_actual_generation_by_type"
 WEATHER = "weather_fr_population_weighted"
-RAW_DATASETS = [DA_PRICES, LOAD_FORECAST, WIND_SOLAR_FORECAST, GENERATION, WEATHER]
+WEATHER_FORECAST = "weather_forecast_fr"
+GAS = "gas_ttf_daily"
+RAW_DATASETS = [
+    DA_PRICES,
+    LOAD_FORECAST,
+    WIND_SOLAR_FORECAST,
+    GENERATION,
+    WEATHER,
+    WEATHER_FORECAST,
+    GAS,
+]
 
 
 # --------------------------------------------------------------------------- cache
@@ -166,3 +180,82 @@ def fetch_weather(
             "cdd": (temperature - config.cdd_base_celsius).clip(lower=0),
         }
     )
+
+
+def _weighted_forecast(
+    points: list[City], variable: str, start_date: str, end_date: str, session: Any = None
+) -> pd.Series:
+    """Weighted average over `points` of one archived NWP variable, on a UTC hourly index."""
+    series = {}
+    for p in points:
+        params = {
+            "latitude": p.lat,
+            "longitude": p.lon,
+            "hourly": variable,
+            "start_date": start_date,
+            "end_date": end_date,
+            "timezone": "GMT",
+        }
+        response = (session or requests).get(PREVIOUS_RUNS_URL, params=params, timeout=120)
+        response.raise_for_status()
+        hourly = response.json()["hourly"]
+        index = pd.to_datetime(hourly["time"]).tz_localize("UTC")
+        series[p.name] = pd.Series(hourly[variable], index=index, dtype=float)
+    values = pd.DataFrame(series)
+    weights = pd.Series({p.name: p.weight for p in points})
+    # Weighted mean over the points that have a value (min_count keeps all-missing as NaN).
+    weighted = values.mul(weights).sum(axis=1, min_count=1)
+    return weighted / values.notna().mul(weights).sum(axis=1).replace(0, float("nan"))
+
+
+def fetch_weather_forecast(
+    forecast: WeatherForecastConfig,
+    weather: WeatherConfig,
+    start_date: str,
+    end_date: str,
+    session: Any = None,
+) -> pd.DataFrame:
+    """National NWP forecasts as issued `lead_days` before each hour (Open-Meteo archive).
+
+    Temperature is population-weighted (demand), 100 m wind speed is weighted by regional
+    wind capacity and solar radiation by regional solar capacity. The archive only holds
+    these forecasts from early 2024 (temperature from 2021); earlier hours are NaN.
+    """
+    suffix = f"_previous_day{forecast.lead_days}"
+    groups = {
+        "nwp_temperature_c": (weather.cities, "temperature_2m"),
+        "nwp_wind_speed_100m_kmh": (forecast.wind_points, "wind_speed_100m"),
+        "nwp_solar_radiation_wm2": (forecast.solar_points, "shortwave_radiation"),
+    }
+    df = pd.DataFrame(
+        {
+            name: _weighted_forecast(points, variable + suffix, start_date, end_date, session)
+            for name, (points, variable) in groups.items()
+        }
+    )
+    df.index = df.index.tz_convert(TIMEZONE)
+    return df
+
+
+# --------------------------------------------------------------------------- gas
+
+
+def fetch_gas(ticker: str, start_date: str, end_date: str, session: Any = None) -> pd.DataFrame:
+    """Daily closing price (EUR/MWh) of a gas future from Yahoo Finance, indexed by date."""
+    params = {
+        "period1": int(pd.Timestamp(start_date, tz="UTC").timestamp()),
+        "period2": int((pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)).timestamp()),
+        "interval": "1d",
+    }
+    response = (session or requests).get(
+        YAHOO_CHART_URL.format(ticker=ticker),
+        params=params,
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=60,
+    )
+    response.raise_for_status()
+    result = response.json()["chart"]["result"][0]
+    dates = pd.to_datetime(result["timestamp"], unit="s").normalize()
+    close = pd.Series(result["indicators"]["quote"][0]["close"], index=dates, dtype=float)
+    close = close[~close.index.duplicated(keep="last")].dropna()
+    return close.rename("gas_close_eur_mwh").to_frame()
