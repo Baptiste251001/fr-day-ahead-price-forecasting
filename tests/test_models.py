@@ -79,7 +79,7 @@ def test_point_metrics_on_known_errors() -> None:
 
     metrics = point_metrics(actual, preds)
 
-    assert metrics.attrs["n_hours"] == 3  # scored only where every model has a forecast
+    assert metrics.attrs["n_periods"] == 3  # scored only where every model has a forecast
     assert metrics.loc["naive", "mae"] == 2.0
     assert metrics.loc["good", "rmse"] == pytest.approx(np.sqrt(2 / 3))
     assert metrics.loc["good", "rmae_vs_naive"] == pytest.approx((2 / 3) / 2)

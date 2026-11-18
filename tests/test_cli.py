@@ -26,8 +26,10 @@ def test_default_config_is_valid() -> None:
     assert cfg.data.resolved_end_date() > cfg.data.start_date
 
 
-def test_features_then_train(raw: dict[str, pd.DataFrame], config: Config, tmp_path: Path) -> None:
-    for name, df in raw.items():
+def test_features_then_train(
+    raw_mtu: dict[str, pd.DataFrame], config: Config, tmp_path: Path
+) -> None:
+    for name, df in raw_mtu.items():
         data.write_cache(df, data.cache_path(config.data.raw_dir, name))
     config_path = _write_config(config, tmp_path)
 
@@ -38,7 +40,7 @@ def test_features_then_train(raw: dict[str, pd.DataFrame], config: Config, tmp_p
     assert result.exit_code == 0, result.output
     assert "Diebold-Mariano" in result.output
 
-    predictions = pd.read_parquet(config.data.processed_dir / "predictions.parquet")
+    predictions = pd.read_parquet(config.data.processed_dir / "predictions_hourly.parquet")
     assert list(predictions.columns) == [
         "naive",
         "lasso",
@@ -46,8 +48,19 @@ def test_features_then_train(raw: dict[str, pd.DataFrame], config: Config, tmp_p
         "extra_trees",
         "ensemble",
     ]
-    reports = ["metrics.csv", "mae_by_year.csv", "dm_tests.csv", "intervals.csv"]
-    for name in [*reports, "figures/mae_by_year.png", "figures/last_two_weeks.png"]:
+    quarters = pd.read_parquet(config.data.processed_dir / "predictions.parquet")
+    assert pd.Series(quarters.index).diff().max() == pd.Timedelta("15min")
+    shape = pd.read_csv(config.reports_dir / "intra_hour_shape.csv", index_col="forecast")["mae"]
+    assert shape["shape model"] < shape["zero (hourly flat)"]  # the shape model adds skill
+    reports = [
+        "metrics.csv",
+        "mae_by_year.csv",
+        "dm_tests.csv",
+        "intervals.csv",
+        "metrics_15min.csv",
+    ]
+    figures = ["mae_by_year.png", "last_two_weeks.png", "quarter_hour_day.png"]
+    for name in [*reports, *[f"figures/{f}" for f in figures]]:
         assert (config.reports_dir / name).exists(), name
 
     result = runner.invoke(app, ["bid", "-c", str(config_path)])

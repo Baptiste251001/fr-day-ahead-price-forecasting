@@ -3,39 +3,52 @@
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-Hour-by-hour forecasts of the French day-ahead electricity price (SDAC auction), built from
-free public data (ENTSO-E Transparency Platform, Open-Meteo, Yahoo Finance) and evaluated
-with a strict **walk-forward** protocol over 2021–2026. This period covers the 2022 energy
-crisis and the surge in negative prices.
+Quarter-hour by quarter-hour forecasts of the French day-ahead electricity price (SDAC
+auction), built from free public data (ENTSO-E Transparency Platform, Open-Meteo, Yahoo
+Finance) and evaluated with a strict **walk-forward** protocol over 2021–2026. This period
+covers the 2022 energy crisis, the surge in negative prices and the auction's switch from
+hourly to 15-minute products on 1 October 2025.
 
 The project focuses on doing the basics rigorously:
 
 - **Gate-aligned information set.** Every input must be public before the 12:00 auction
   gate on D-1. Tests check this by perturbing future data.
+- **The market's own resolution.** The forecast covers the 96 quarter-hours of each day: an
+  hourly level learned on the full history, plus an intra-hour shape learned on the
+  15-minute prices.
 - **Strong benchmarks.** Models are compared with Diebold–Mariano tests.
 - **Calibrated prediction intervals.** Their real coverage is reported, not only the
   nominal one.
 - **Forecasts turned into orders.** A battery bids on the auction from the forecasts, and
   the strategies are scored in euros, not only in MAE.
 
-**Key results** (51,246 out-of-sample hours, January 2021 to November 2026):
+**Key results** (202,312 out-of-sample quarter-hours, January 2021 to November 2026):
 
 | Model | MAE (€/MWh) | RMSE (€/MWh) | rMAE vs naive | 90% interval coverage |
 |---|---:|---:|---:|---:|
-| naive | 29.41 | 53.21 | 1.00 | 86.9% |
-| **lasso** | **24.58** | **41.01** | **0.84** | 87.4% |
-| lightgbm | 35.53 | 60.95 | 1.21 | 85.1% |
-| extra_trees | 26.36 | 43.10 | 0.90 | 86.6% |
-| ensemble (median) | 25.59 | 42.56 | 0.87 | 86.7% |
+| naive | 29.40 | 53.34 | 1.00 | 87.2% |
+| **lasso** | **24.55** | **41.10** | **0.84** | 87.4% |
+| lightgbm | 35.68 | 61.23 | 1.21 | 85.1% |
+| extra_trees | 26.35 | 43.20 | 0.90 | 86.6% |
+| ensemble (median) | 25.60 | 42.68 | 0.87 | 86.6% |
+
+Since the switch to 15-minute products (36,644 quarter-hours, October 2025 to November 2026):
+
+| Forecast | MAE (€/MWh) | rMAE vs naive |
+|---|---:|---:|
+| naive (same quarter, previous day or week) | 32.47 | 1.00 |
+| ensemble, hourly forecast repeated on its four quarters | 27.00 | 0.83 |
+| **ensemble + intra-hour shape** | **26.17** | **0.81** |
 
 - **The Lasso is the best model over the full period.** It is 16% more accurate than the
   naive benchmark, and better than every other model (Diebold–Mariano p < 0.001).
 - **Since 2023, the median ensemble is the most accurate model in every year.** In
   2021–2022, tree models broke down because prices rose far above anything in their
   training data.
-
+- **The 15-minute shape is predictable.** Quarters deviate from their hourly mean by
+  7.6 €/MWh on average. The shape model cuts that error by 27%, to 5.5 €/MWh.
 - **In euros, better forecasts are worth less than MAE suggests.** A 1 MW / 2 MWh battery
-  bidding from the forecasts captures 85% of its perfect-foresight profit with price-quantity
+  bidding from the forecasts captures 86% of its perfect-foresight profit with price-quantity
   bid curves, against 80% when it simply trusts the naive forecast.
 
 ![MAE by year](reports/figures/mae_by_year.png)
@@ -54,9 +67,10 @@ The project focuses on doing the basics rigorously:
 
 ## The forecasting problem
 
-Every day before 12:00 CET, buyers and sellers submit bids for each hour of the next day to
-the European day-ahead auction. Forecasting those 24 prices on the morning of D-1 is the
-canonical electricity price forecasting (EPF) task.
+Every day before 12:00 CET, buyers and sellers submit bids for the next day to the
+European day-ahead auction. Until 30 September 2025 the auction cleared 24 hourly prices;
+since 1 October 2025 it clears 96 quarter-hour prices. Forecasting those prices on the
+morning of D-1 is the canonical electricity price forecasting (EPF) task.
 
 France is an interesting case:
 
@@ -87,7 +101,34 @@ legal deadline 18:00), so they cannot be used as inputs for day D.
 
 `tests/test_features.py` perturbs, in turn, the prices of day D, the wind/solar forecasts
 for day D, the gas closes of D-1, and the realized data of D-1. Each time, it asserts that
-none of day D's features change.
+none of day D's features change. `tests/test_quarter_hour.py` does the same for the
+15-minute features below.
+
+### From hourly to 15-minute forecasts
+
+Fifteen-minute prices exist only since October 2025, about a year of data: too little to
+train the full models on. The forecast is therefore built in two stages
+(`src/fr_power/quarter_hour.py`):
+
+1. **Hourly level.** The models below forecast the hourly average price, trained on the
+   whole history since 2019.
+2. **Intra-hour shape.** A Lasso forecasts each quarter's deviation from its hourly mean.
+   It is trained on 15-minute prices only, refitted every week. Its features are all known
+   before the gate:
+   - the quarter's position in the hour;
+   - the same quarter's deviation on D-1, and its average over the last 7 and 28 days;
+   - the ramp of the hourly price forecast around that hour, times the quarter position;
+   - the within-hour variation of the load forecast for D and of the wind and solar
+     forecasts for D-1.
+
+   Before the switch the shape is zero: the four quarters of an hour shared one price.
+
+The ramp is computed from forecasts for day D only. At 23:00, a centred slope would use the
+forecast for 00:00 on D+1, which is built from day D's prices.
+
+Fetching the prices also needed care. After the switch, the ENTSO-E client's default hourly
+query returns the price of each hour's **first quarter**, not the hourly average (10.7 €/MWh
+apart on average). The prices are now downloaded at the resolution of the traded products.
 
 ### Models
 
@@ -99,20 +140,27 @@ none of day D's features change.
 | `extra_trees` | Extremely randomized trees, a robust tree benchmark |
 | `ensemble` | Hour-by-hour median of `lasso`, `lightgbm` and `extra_trees` |
 
+Each model's 15-minute forecast is its hourly forecast plus the shared intra-hour shape. The
+15-minute `naive` repeats each quarter's price from the previous day, or from the previous
+week on Mondays and weekends.
+
 ### Evaluation protocol
 
 - **Expanding-window walk-forward.** Each model is trained on two years of history,
   predicts the next 30 days, then the window expands and every model is refitted from
   scratch. Folds start at local midnight, so no model ever sees a price from the auction
   it forecasts.
-- **Same hours for every model.** Metrics are computed only on hours where all models have
+- **Scored per quarter-hour.** Before October 2025 a quarter's price is its hour's price,
+  so the yearly results up to 2024 are identical to an hourly evaluation.
+- **Same quarter-hours for every model.** Metrics are computed only where all models have
   a forecast.
 - **Metrics.** MAE, RMSE, median absolute error, and rMAE (MAE relative to the naive model;
   below 1 beats naive).
-- **Diebold–Mariano tests.** The 24 forecasts of a day are issued together, so their errors
+- **Diebold–Mariano tests.** The forecasts of a day are issued together, so their errors
   are correlated. The absolute-loss differential is averaged per day before testing.
-- **90% prediction intervals: rolling split-conformal.** For each delivery hour, the
-  half-width is the 90% quantile of that hour's absolute errors over the previous 60 days.
+- **90% prediction intervals: rolling split-conformal.** For each quarter-hour of the day,
+  the half-width is the 90% quantile of that quarter's absolute errors over the previous 60
+  days.
   It uses only errors known at decision time. Intervals are scored on coverage, width, and
   interval (Winkler) score (`reports/intervals.csv`).
 
@@ -126,8 +174,8 @@ Out-of-sample MAE by year (€/MWh):
 | 2022 | 53.00 | **45.41** | 77.77 | 50.29 | 49.27 | Energy crisis, mean price €276/MWh |
 | 2023 | 23.45 | 19.43 | 18.93 | 19.33 | **18.46** | Nuclear fleet recovers |
 | 2024 | 21.74 | 18.08 | 18.77 | 18.05 | **17.54** | 352 negative-price hours |
-| 2025 | 24.39 | 19.09 | 19.29 | 19.10 | **18.56** | 509 negative-price hours |
-| 2026 | 34.39 | 28.13 | 28.93 | 29.72 | **28.21** | Higher, more volatile prices (to mid-November) |
+| 2025 | 24.01 | 18.81 | 19.14 | 18.83 | **18.33** | 509 negative-price hours; 15-minute products from October |
+| 2026 | 34.29 | **27.78** | 28.68 | 29.30 | 27.87 | Higher, more volatile prices (to mid-November) |
 
 **What this shows**
 
@@ -138,7 +186,7 @@ Out-of-sample MAE by year (€/MWh):
    training window, LightGBM, which can only predict values within the range of its
    training targets, was much worse than the naive forecast. Once the crisis is part of
    the training history, trees catch up, and the median ensemble becomes the best model
-   every year from 2023.
+   in 2023–2025 (in 2026 so far, the Lasso is marginally better).
 3. **What drives the forecast.** The previous day's price dominates, followed by the
    two-day lag, the residual load proxy, the weekly lag and the gas cost (LightGBM split
    gain, notebook 02).
@@ -155,7 +203,8 @@ Out-of-sample MAE by year (€/MWh):
 | TSO wind/solar forecasts for day D used as inputs | 22.90 | Not a valid result: those forecasts are published after the gate |
 | Same forecasts shifted to day D-1 (published on D-2) | 24.83 | The honest baseline, 8% worse |
 | + gas cost (TTF close of D-2) | **24.58** | Final feature set |
-| + Extra Trees and median ensemble | 25.59 (ensemble) | Best model every year since 2023 |
+| + Extra Trees and median ensemble | 25.59 (ensemble) | Best model in 2023–2025 |
+| Scored per quarter-hour, prices fetched at product resolution, + intra-hour shape | 24.55 | Since the switch, the shape cuts the ensemble's quarter-hour MAE from 27.00 to 26.17 |
 
 Also tested and **not kept**, because they did not improve overall accuracy:
 
@@ -167,16 +216,20 @@ Also tested and **not kept**, because they did not improve overall accuracy:
 The two notebooks go further:
 
 - [`01_data_exploration.ipynb`](notebooks/01_data_exploration.ipynb): price regimes,
-  negative prices, the solar dip, generation mix, temperature sensitivity.
+  negative prices, the solar dip, generation mix, temperature sensitivity, and the
+  intra-hour shape of 15-minute prices.
 - [`02_forecast_evaluation.ipynb`](notebooks/02_forecast_evaluation.ipynb): accuracy by year
-  and hour, Diebold–Mariano tests, interval coverage by year, sample weeks, LightGBM
-  feature importance.
+  and hour, Diebold–Mariano tests, interval coverage by year, the 15-minute shape's
+  contribution, sample weeks, LightGBM feature importance.
+
+![A quarter-hour day](reports/figures/quarter_hour_day.png)
 
 ## From forecasts to bids: a battery on the auction
 
 A desk does not trade a forecast, it submits orders. `fr-power bid` replays the out-of-sample
 period as a small battery operator (1 MW / 2 MWh, 88% round-trip efficiency, empty at the
-start of each day) bidding on the day-ahead auction every day.
+start of each day) bidding on the day-ahead auction every day. The backtest still uses
+hourly orders and the hourly forecasts; moving it to 15-minute orders is the next step.
 
 **Why a forecast matters for bidding.** A small, flexible generator should simply offer at
 its marginal cost, whatever the forecast. A battery is different: the value of charging at
@@ -200,29 +253,29 @@ with hindsight.
 
 | Strategy | Profit (€/MW/year) | Share of perfect foresight | Cycles/day |
 |---|---:|---:|---:|
-| perfect_foresight | 78,900 | 100% | 1.85 |
-| schedule_naive | 62,800 | 79.6% | 1.84 |
-| schedule_lasso | 66,300 | 84.0% | 1.78 |
-| schedule_ensemble | 65,500 | 83.0% | 1.71 |
-| **curves_ensemble** | **67,000** | **85.0%** | 1.79 |
+| perfect_foresight | 76,300 | 100% | 1.81 |
+| schedule_naive | 61,400 | 80.4% | 1.81 |
+| schedule_lasso | 64,400 | 84.4% | 1.76 |
+| schedule_ensemble | 63,700 | 83.5% | 1.69 |
+| **curves_ensemble** | **65,300** | **85.6%** | 1.76 |
 
-2,082 delivery days (2021 to November 2026); per-year results are in
+2,085 delivery days (2021 to November 2026); per-year results are in
 `reports/bidding_by_year.csv`.
 
 **What this shows**
 
 1. **Forecast accuracy is worth less than its MAE gain.** The Lasso cuts the naive error by
-   16%, but adds only 4.4 points of captured profit. A battery needs the *ranking* of the
+   16%, but adds only 4 points of captured profit. A battery needs the *ranking* of the
    hours (cheap midday, expensive evening), and the naive forecast already gets that ranking
    mostly right.
 2. **Bidding curves beat fixed quantities in every year.** Against the schedule built on the
-   same forecast, they earn 1,000 to 2,800 €/MW more per full year (450 in the partial year
+   same forecast, they earn 900 to 2,800 €/MW more per full year (700 in the partial year
    2026). The gain comes from hours where the decision depends on the price: buy at night
    only if the price is negative, or sell less in the morning if the price turns out low
    (right panel below). On most hours the optimal curve is flat, and the battery trades the
    same volume whatever the price.
 3. **The imbalance risk of curves is tiny.** Committed volumes the battery could not deliver
-   average 0.001 MWh/day.
+   average 0.002 MWh/day.
 
 ![Battery bidding backtest](reports/figures/bidding.png)
 
@@ -246,7 +299,7 @@ address. Once access is granted (usually within a few days), generate the token 
 ```bash
 uv run fr-power fetch      # download 2019 -> today to data/raw/ (~15 min, cached)
 uv run fr-power features   # build data/processed/feature_matrix.parquet
-uv run fr-power train      # walk-forward evaluation (~10 min) -> reports/
+uv run fr-power train      # walk-forward, hourly level + 15-min shape (~15 min) -> reports/
 uv run fr-power bid        # battery bidding backtest on the forecasts (~20 min)
 ```
 
@@ -262,6 +315,7 @@ src/fr_power/
 ├── data.py                 ENTSO-E, Open-Meteo and gas-price download, parquet cache
 ├── features.py             point-in-time feature matrix
 ├── models.py               naive / lasso / LightGBM / Extra Trees, ensemble, walk-forward
+├── quarter_hour.py         15-minute stage: intra-hour shape on top of the hourly level
 ├── evaluation.py           metrics, Diebold-Mariano tests, conformal intervals
 ├── bidding.py              battery bid curves (scenario LP), settlement, profit backtest
 └── cli.py                  `fr-power fetch | features | train | bid`
@@ -288,8 +342,9 @@ uv run mypy src
   covariates cut price errors by 15–34%.
 - **No carbon price.** A free daily EU carbon (EUA) series exists only from late 2021, so
   the fuel-cost feature uses gas alone.
-- **Hourly resolution.** Since October 2025 the auction clears 15-minute products. This
-  project forecasts hourly prices; moving to the 15-minute grid would match the market.
+- **A short 15-minute history.** The intra-hour shape is learned on about a year of
+  15-minute prices, and the hourly level carries most of the error. The bidding backtest
+  still trades hourly products.
 - **Simplified LEAR.** A full LEAR uses 24 hourly models and a variance-stabilizing
   transform (e.g. asinh) of prices.
 - **Untuned hyperparameters.** No search was run inside the walk-forward loop.

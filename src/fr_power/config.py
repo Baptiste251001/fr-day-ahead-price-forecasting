@@ -98,6 +98,15 @@ class ModelsConfig(BaseModel):
     ensemble: list[str] = ["lasso", "lightgbm", "extra_trees"]
 
 
+class QuarterHourConfig(BaseModel):
+    """Intra-hour shape model, trained on 15-minute prices only (quarter_hour.py)."""
+
+    initial_train_days: int = Field(default=28, gt=0)
+    retrain_every_days: int = Field(default=7, gt=0)
+    profile_days: int = Field(default=28, ge=7)
+    ramp_model: str = "ensemble"  # hourly forecast whose ramp shapes the quarters
+
+
 class BiddingConfig(BaseModel):
     """Battery and settlement assumptions for the bidding backtest (`fr-power bid`)."""
 
@@ -118,6 +127,7 @@ class Config(BaseModel):
     features: FeaturesConfig = FeaturesConfig()
     walk_forward: WalkForwardConfig
     models: ModelsConfig
+    quarter_hour: QuarterHourConfig = QuarterHourConfig()
     bidding: BiddingConfig = BiddingConfig()
 
 

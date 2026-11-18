@@ -10,11 +10,15 @@ from fr_power import data
 from fr_power.config import Config
 
 
-def make_raw(days: int = 60, seed: int = 0) -> dict[str, pd.DataFrame]:
+def make_raw(days: int = 60, seed: int = 0, start: str = "2024-01-01") -> dict[str, pd.DataFrame]:
     """Hourly synthetic raw data; the last third of the period is at 15-minute resolution
-    for load and generation, as in the real ENTSO-E feed after the 15-minute MTU switch."""
+    for load and generation, as in the real ENTSO-E feed after the 15-minute MTU switch.
+
+    Prices are hourly before `data.MTU_15MIN_START` and 15-minute after it, with an
+    intra-hour shape that follows the hourly price ramp, as on the real auction.
+    """
     rng = np.random.default_rng(seed)
-    hourly = pd.date_range("2024-01-01", periods=days * 24, freq="h", tz=data.TIMEZONE)
+    hourly = pd.date_range(start, periods=days * 24, freq="h", tz=data.TIMEZONE)
     n = len(hourly)
     hour = hourly.hour.to_numpy()
     load = 50_000 + 8_000 * np.sin((hour - 6) / 24 * 2 * np.pi) + rng.normal(0, 500, n)
@@ -32,14 +36,14 @@ def make_raw(days: int = 60, seed: int = 0) -> dict[str, pd.DataFrame]:
     )
     generation.iloc[n // 2 :, 1] = 500.0  # a technology that starts reporting halfway
 
-    days_index = pd.date_range("2024-01-01", periods=days, freq="D")
+    days_index = pd.date_range(start, periods=days, freq="D")
     temperature = 8 + rng.normal(0, 3, days)
     gas = pd.DataFrame(  # trading days only, as on an exchange
         {"gas_close_eur_mwh": 30 + rng.normal(0, 2, days)}, index=days_index
     )
     gas = gas[gas.index.dayofweek < 5]
     return {
-        data.DA_PRICES: pd.DataFrame({"day_ahead_price_eur_mwh": price}, index=hourly),
+        data.DA_PRICES: _prices(pd.Series(price, index=hourly), rng),
         data.LOAD_FORECAST: load_df,
         data.WIND_SOLAR_FORECAST: pd.DataFrame(
             {"Solar": solar, "Wind Onshore": wind}, index=hourly
@@ -53,9 +57,38 @@ def make_raw(days: int = 60, seed: int = 0) -> dict[str, pd.DataFrame]:
     }
 
 
+def _prices(hourly: pd.Series, rng: np.random.Generator) -> pd.DataFrame:
+    """Hourly prices, switched to 15-minute ones (hourly level + ramp-driven shape)."""
+    after = hourly.index >= data.MTU_15MIN_START
+    parts = [hourly[~after]]
+    if after.any():
+        level = hourly[after]
+        ramp = (level.shift(-1) - level.shift(1)).fillna(0) / 2
+        quarters = pd.date_range(level.index[0], periods=4 * len(level), freq="15min")
+        position = np.tile([-1.5, -0.5, 0.5, 1.5], len(level))
+        shape = 0.5 * np.repeat(ramp.to_numpy(), 4) * position
+        noise = rng.normal(0, 0.3, len(quarters))
+        shape = (
+            shape
+            - pd.Series(shape + noise)
+            .groupby(np.arange(len(quarters)) // 4)
+            .transform("mean")
+            .to_numpy()
+            + noise
+        )
+        parts.append(pd.Series(np.repeat(level.to_numpy(), 4) + shape, index=quarters))
+    return pd.concat(parts).rename("day_ahead_price_eur_mwh").to_frame()
+
+
 @pytest.fixture
 def raw() -> dict[str, pd.DataFrame]:
     return make_raw()
+
+
+@pytest.fixture
+def raw_mtu() -> dict[str, pd.DataFrame]:
+    """Synthetic data spanning the switch to 15-minute products (43 days after it)."""
+    return make_raw(days=90, start="2025-08-15")
 
 
 @pytest.fixture
@@ -88,6 +121,7 @@ def config(tmp_path) -> Config:  # type: ignore[no-untyped-def]
                 },
                 "extra_trees": {"n_estimators": 20, "min_samples_leaf": 5, "max_features": 0.5},
             },
+            "quarter_hour": {"initial_train_days": 7, "retrain_every_days": 7, "profile_days": 7},
             "bidding": {"scenario_window_days": 10, "scenario_min_days": 5},
         }
     )

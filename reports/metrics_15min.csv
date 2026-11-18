@@ -1,0 +1,7 @@
+model,mae,rmse,median_ae,rmae_vs_naive
+naive,32.466,49.434,20.04,1.0
+lasso,26.332,36.652,19.63,0.811
+lightgbm,26.863,37.3,20.401,0.827
+extra_trees,27.36,37.289,21.367,0.843
+ensemble,26.166,36.411,19.753,0.806
+ensemble_hourly_flat,27.001,37.479,20.374,0.832

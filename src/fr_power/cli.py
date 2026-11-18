@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import typer
 
-from fr_power import bidding, data
+from fr_power import bidding, data, quarter_hour
 from fr_power.config import DEFAULT_CONFIG_PATH, BiddingConfig, Config, load_config
 from fr_power.evaluation import (
     conformal_intervals,
@@ -27,7 +27,9 @@ app = typer.Typer(help="French day-ahead electricity price forecasting.", no_arg
 ConfigOption = typer.Option(DEFAULT_CONFIG_PATH, "--config", "-c", help="YAML config file.")
 
 FEATURES_FILE = "feature_matrix.parquet"
-PREDICTIONS_FILE = "predictions.parquet"
+HOURLY_PREDICTIONS_FILE = "predictions_hourly.parquet"
+PREDICTIONS_FILE = "predictions.parquet"  # 15-minute forecasts
+PRICES_FILE = "prices_15min.parquet"
 
 
 def _load(config: Path) -> Config:
@@ -85,12 +87,20 @@ def features(config: Path = ConfigOption) -> None:
 
 @app.command()
 def train(config: Path = ConfigOption) -> None:
-    """Walk-forward train and evaluate all models; write predictions and reports."""
+    """Walk-forward train and evaluate all models; write 15-minute forecasts and reports.
+
+    Stage 1 forecasts the hourly price level, stage 2 the shape within each hour.
+    """
     cfg = _load(config)
     matrix = data.read_cache(cfg.data.processed_dir / FEATURES_FILE)
     if matrix is None:
         typer.echo("ERROR: no feature matrix found. Run `fr-power features` first.", err=True)
         raise typer.Exit(1)
+    try:
+        raw = data.load_raw(cfg.data.raw_dir)
+    except FileNotFoundError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
     matrix = matrix[matrix[TARGET].notna()]
 
     wf = cfg.walk_forward
@@ -102,8 +112,24 @@ def train(config: Path = ConfigOption) -> None:
         retrain_every_days=wf.retrain_every_days,
     )
     predictions = add_ensemble(predictions, cfg.models.ensemble)
-    data.write_cache(predictions, cfg.data.processed_dir / PREDICTIONS_FILE)
-    write_reports(matrix[TARGET], predictions, cfg.reports_dir)
+    processed = cfg.data.processed_dir
+    data.write_cache(predictions, processed / HOURLY_PREDICTIONS_FILE)
+
+    q = cfg.quarter_hour
+    price = quarter_hour.quarter_prices(raw)
+    price = price[price.index <= matrix.index.max() + pd.Timedelta(minutes=45)]
+    shape = quarter_hour.predict_shape(
+        quarter_hour.build_shape_matrix(raw, predictions[q.ramp_model], q.profile_days),
+        cfg.models.lasso,
+        initial_train_days=q.initial_train_days,
+        retrain_every_days=q.retrain_every_days,
+        random_seed=cfg.random_seed,
+    )
+    quarters = quarter_hour.quarter_hour_predictions(price, predictions, shape)
+    data.write_cache(quarters, processed / PREDICTIONS_FILE)
+    data.write_cache(price.to_frame(), processed / PRICES_FILE)
+    flat = quarter_hour.broadcast_hourly(predictions[[q.ramp_model]], price.index)
+    write_reports(price, quarters, cfg.reports_dir, hourly_flat=flat)
 
 
 @app.command()
@@ -111,7 +137,7 @@ def bid(config: Path = ConfigOption) -> None:
     """Backtest day-ahead bidding for a battery on the walk-forward forecasts."""
     cfg = _load(config)
     matrix = data.read_cache(cfg.data.processed_dir / FEATURES_FILE)
-    predictions = data.read_cache(cfg.data.processed_dir / PREDICTIONS_FILE)
+    predictions = data.read_cache(cfg.data.processed_dir / HOURLY_PREDICTIONS_FILE)
     if matrix is None or predictions is None:
         typer.echo("ERROR: no predictions found. Run `fr-power train` first.", err=True)
         raise typer.Exit(1)
@@ -205,8 +231,17 @@ def _bidding_figure(
     plt.close(fig)
 
 
-def write_reports(actual: pd.Series, predictions: pd.DataFrame, reports_dir: Path) -> None:
-    """Metric tables (CSV) and figures (PNG) under `reports_dir`."""
+def write_reports(
+    actual: pd.Series,
+    predictions: pd.DataFrame,
+    reports_dir: Path,
+    hourly_flat: pd.DataFrame | None = None,
+) -> None:
+    """Metric tables (CSV) and figures (PNG) under `reports_dir`.
+
+    `actual` and `predictions` are 15-minute series. `hourly_flat` holds hourly forecasts
+    repeated on each quarter, to measure what the intra-hour shape adds since the switch.
+    """
     matplotlib.use("Agg")
     figures = reports_dir / "figures"
     figures.mkdir(parents=True, exist_ok=True)
@@ -223,7 +258,7 @@ def write_reports(actual: pd.Series, predictions: pd.DataFrame, reports_dir: Pat
     ).T
     interval_table.round(3).to_csv(reports_dir / "intervals.csv", index_label="model")
 
-    typer.echo(f"\nOut-of-sample metrics ({metrics.attrs['n_hours']:,} hours, EUR/MWh):")
+    typer.echo(f"\nOut-of-sample metrics ({metrics.attrs['n_periods']:,} quarter-hours, EUR/MWh):")
     typer.echo(metrics.round(2).to_string())
     typer.echo("\nMAE by year:")
     typer.echo(yearly.round(2).to_string())
@@ -231,13 +266,16 @@ def write_reports(actual: pd.Series, predictions: pd.DataFrame, reports_dir: Pat
     typer.echo(dm.round(4).to_string(index=False))
     typer.echo("\n90% rolling conformal intervals:")
     typer.echo(interval_table.round(3).to_string())
+    if hourly_flat is not None:
+        _quarter_hour_reports(actual, predictions, hourly_flat, reports_dir)
 
-    fig, ax = plt.subplots(figsize=(8, 4))
-    yearly.plot.bar(ax=ax, rot=0)
-    ax.set(ylabel="MAE (EUR/MWh)", xlabel="", title="Out-of-sample MAE by year")
-    fig.tight_layout()
-    fig.savefig(figures / "mae_by_year.png", dpi=120)
-    plt.close(fig)
+    if not yearly.empty:
+        fig, ax = plt.subplots(figsize=(8, 4))
+        yearly.plot.bar(ax=ax, rot=0)
+        ax.set(ylabel="MAE (EUR/MWh)", xlabel="", title="Out-of-sample MAE by year")
+        fig.tight_layout()
+        fig.savefig(figures / "mae_by_year.png", dpi=120)
+        plt.close(fig)
 
     best = "ensemble" if "ensemble" in predictions else predictions.columns[-1]
     last = predictions.dropna().index.max()
@@ -256,6 +294,54 @@ def write_reports(actual: pd.Series, predictions: pd.DataFrame, reports_dir: Pat
     fig.savefig(figures / "last_two_weeks.png", dpi=120)
     plt.close(fig)
     typer.echo(f"\n  reports written to {reports_dir}/")
+
+
+def _quarter_hour_reports(
+    actual: pd.Series, predictions: pd.DataFrame, hourly_flat: pd.DataFrame, reports_dir: Path
+) -> None:
+    """Accuracy since the 15-minute switch, with and without the intra-hour shape."""
+    since = actual.index >= data.MTU_15MIN_START
+    flat = hourly_flat.rename(columns=lambda c: f"{c}_hourly_flat")
+    candidates = pd.concat([predictions, flat], axis=1)[since]
+    if candidates.dropna().empty:
+        return
+    table = point_metrics(actual[since], candidates)
+    table.round(3).to_csv(reports_dir / "metrics_15min.csv", index_label="model")
+    best = flat.columns[0].removesuffix("_hourly_flat")
+    # The shape forecast is the same for every model: read it off one of them.
+    shape = (predictions[best] - flat.iloc[:, 0])[since]
+    deviation = quarter_hour.within_hour(actual)[since][shape.notna()]
+    shape_mae = pd.Series(
+        {
+            "zero (hourly flat)": deviation.abs().mean(),
+            "shape model": (deviation - shape.dropna()).abs().mean(),
+        },
+        name="mae",
+    )
+    shape_mae.round(3).to_csv(reports_dir / "intra_hour_shape.csv", index_label="forecast")
+    typer.echo(f"\nSince the 15-minute switch ({table.attrs['n_periods']:,} quarter-hours):")
+    typer.echo(table.round(2).to_string())
+    typer.echo("\nMAE of the intra-hour deviation (EUR/MWh):")
+    typer.echo(shape_mae.round(2).to_string())
+
+    # A typical day: the median daily error of the last 30 scored days.
+    errors = (predictions[best] - actual)[since].dropna().abs()
+    daily_mae = errors.groupby(errors.index.date).mean().iloc[-30:]
+    day = daily_mae.index[daily_mae.rank(method="first").eq((len(daily_mae) + 1) // 2)][0]
+    sel = actual.index.date == day
+    times = actual.index[sel].tz_localize(None)
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.step(times, actual[sel], where="post", color="black", linewidth=1.6, label="actual")
+    ax.step(times, flat.iloc[:, 0][sel], where="post", linewidth=1, label=f"{best}, hourly")
+    ax.step(times, predictions[best][sel], where="post", linewidth=1.2, label=f"{best}, 15-min")
+    ax.set(
+        ylabel="EUR/MWh", title=f"Quarter-hour prices on {day} (median-error day of the last 30)"
+    )
+    ax.legend()
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    fig.savefig(reports_dir / "figures" / "quarter_hour_day.png", dpi=120)
+    plt.close(fig)
 
 
 if __name__ == "__main__":

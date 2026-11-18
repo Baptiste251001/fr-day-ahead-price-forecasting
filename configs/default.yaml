@@ -53,6 +53,12 @@ models:
     min_samples_leaf: 10
     max_features: 0.5
 
+quarter_hour:                 # 15-minute shape on top of the hourly level (since 2025-10-01)
+  initial_train_days: 28      # 15-minute history before the first shape forecast
+  retrain_every_days: 7
+  profile_days: 28            # mean intra-hour deviation over the last 28 days
+  ramp_model: ensemble
+
 bidding:                      # `fr-power bid`: battery bidding backtest on the forecasts
   power_mw: 1.0
   energy_mwh: 2.0             # 2-hour battery, empty at the start of each delivery day

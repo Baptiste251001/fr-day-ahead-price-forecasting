@@ -4,7 +4,8 @@ Every pull goes through `cached_fetch`, so re-running the pipeline never re-hits
 unnecessarily and tests never need network access.
 
 Series pulled for the FR bidding zone:
-  * day-ahead auction price (the forecasting target),
+  * day-ahead auction price (the forecasting target): hourly products until 30 September
+    2025, 15-minute products from 1 October 2025 (SDAC 15-minute market time unit),
   * day-ahead load forecast and day-ahead wind & solar forecast (known before the auction),
   * actual generation by production type (realized, so only used with a lag),
   * daily population-weighted temperature for a basket of French cities (Open-Meteo),
@@ -31,6 +32,8 @@ COUNTRY_CODE = "FR"
 TIMEZONE = "Europe/Paris"
 OPEN_METEO_URL = "https://archive-api.open-meteo.com/v1/archive"
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+# First delivery day of 15-minute products on the SDAC day-ahead auction.
+MTU_15MIN_START = pd.Timestamp("2025-10-01", tz=TIMEZONE)
 
 # Cache file name (without .parquet) for each raw dataset.
 DA_PRICES = "entsoe_day_ahead_prices"
@@ -109,6 +112,30 @@ def entsoe_client() -> Any:
     return EntsoePandasClient(api_key=token)
 
 
+def fetch_day_ahead_prices(client: Any, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    """Day-ahead prices at the resolution of the traded products.
+
+    Hourly before `MTU_15MIN_START`, 15-minute from then on. The resolution must be asked
+    for explicitly: after the switch, entsoe-py's default hourly query returns the price of
+    each hour's first quarter, not the hourly average.
+    """
+    parts = []
+    if start < MTU_15MIN_START:
+        end_hourly = min(end, MTU_15MIN_START)
+        hourly = client.query_day_ahead_prices(
+            COUNTRY_CODE, start=start, end=end_hourly, resolution="60min"
+        )
+        parts.append(hourly[hourly.index < MTU_15MIN_START])
+    if end > MTU_15MIN_START:
+        parts.append(
+            client.query_day_ahead_prices(
+                COUNTRY_CODE, start=max(start, MTU_15MIN_START), end=end, resolution="15min"
+            )
+        )
+    prices = pd.concat(parts)
+    return prices[~prices.index.duplicated()].rename("day_ahead_price_eur_mwh").to_frame()
+
+
 def fetch_entsoe(
     client: Any,
     start: pd.Timestamp,
@@ -118,11 +145,7 @@ def fetch_entsoe(
 ) -> dict[str, pd.DataFrame]:
     """Fetch (or load from cache) the four ENTSO-E series used by the model."""
     queries: dict[str, Callable[[], pd.DataFrame]] = {
-        DA_PRICES: lambda: (
-            client.query_day_ahead_prices(COUNTRY_CODE, start=start, end=end)
-            .rename("day_ahead_price_eur_mwh")
-            .to_frame()
-        ),
+        DA_PRICES: lambda: fetch_day_ahead_prices(client, start, end),
         LOAD_FORECAST: lambda: client.query_load_forecast(COUNTRY_CODE, start=start, end=end),
         WIND_SOLAR_FORECAST: lambda: client.query_wind_and_solar_forecast(
             COUNTRY_CODE, start=start, end=end, process_type="A01"

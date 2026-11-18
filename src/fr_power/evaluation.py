@@ -31,7 +31,7 @@ def point_metrics(actual: pd.Series, predictions: pd.DataFrame) -> pd.DataFrame:
     )
     if "naive" in out.index:
         out["rmae_vs_naive"] = out["mae"] / out.loc["naive", "mae"]
-    out.attrs["n_hours"] = len(df)
+    out.attrs["n_periods"] = len(df)
     return out
 
 
@@ -39,8 +39,9 @@ def mae_by_year(actual: pd.Series, predictions: pd.DataFrame, min_days: int = 30
     """MAE per calendar year, skipping years with fewer than `min_days` scored days."""
     df = common_rows(actual, predictions)
     errors = df[predictions.columns].sub(df["actual"], axis=0).abs()
-    by_year = errors.groupby(errors.index.year)
-    return by_year.mean()[by_year.size() >= min_days * 24].rename_axis("year")
+    years = errors.index.year
+    n_days = pd.Series(errors.index.date, index=errors.index).groupby(years).nunique()
+    return errors.groupby(years).mean()[n_days >= min_days].rename_axis("year")
 
 
 def diebold_mariano(
@@ -83,15 +84,19 @@ def conformal_intervals(
 ) -> pd.DataFrame:
     """Rolling split-conformal prediction intervals around a point forecast.
 
-    For each delivery hour, the half-width is the `coverage` quantile of that hour's absolute
-    errors over the previous `window_days` days. Day D's interval only uses errors of days up
+    For each delivery period of the day (hour or quarter-hour), the half-width is the
+    `coverage` quantile of that period's absolute errors over the previous `window_days`
+    days. Day D's interval only uses errors of days up
     to D-1, all known at decision time (D-1's prices are published on D-2). Returns columns
     `lower` and `upper`, NaN until `min_days` days of errors are available.
     """
     errors = (actual - forecast).abs().dropna()
-    table = errors.groupby([errors.index.date, errors.index.hour]).mean().unstack()
+    slot = errors.index.hour * 60 + errors.index.minute  # period of the day
+    table = errors.groupby([errors.index.date, slot]).mean().unstack()
     half_width = table.rolling(window_days, min_periods=min_days).quantile(coverage).shift(1)
-    keys = pd.MultiIndex.from_arrays([forecast.index.date, forecast.index.hour])
+    keys = pd.MultiIndex.from_arrays(
+        [forecast.index.date, forecast.index.hour * 60 + forecast.index.minute]
+    )
     width = half_width.stack().reindex(keys).to_numpy()
     return pd.DataFrame(
         {"lower": forecast - width, "upper": forecast + width}, index=forecast.index
@@ -108,5 +113,5 @@ def interval_metrics(actual: pd.Series, intervals: pd.DataFrame, coverage: float
         "coverage": float(((y >= lo) & (y <= hi)).mean()),
         "mean_width": float((hi - lo).mean()),
         "interval_score": float(score.mean()),
-        "n_hours": len(df),
+        "n_periods": len(df),
     }
