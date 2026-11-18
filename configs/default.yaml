@@ -52,3 +52,13 @@ models:
     n_estimators: 100
     min_samples_leaf: 10
     max_features: 0.5
+
+bidding:                      # `fr-power bid`: battery bidding backtest on the forecasts
+  power_mw: 1.0
+  energy_mwh: 2.0             # 2-hour battery, empty at the start of each delivery day
+  round_trip_efficiency: 0.88
+  schedule_models: [naive, lasso, ensemble]   # point forecast -> fixed quantities
+  curve_model: ensemble       # forecast + past error days -> price-quantity curves
+  scenario_window_days: 60    # scenarios = error vectors of the previous 60 days
+  scenario_min_days: 20
+  imbalance_penalty_eur_mwh: 50   # undeliverable volume traded back at DA price +/- this

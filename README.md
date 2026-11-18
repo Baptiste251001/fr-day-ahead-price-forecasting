@@ -15,6 +15,8 @@ The project focuses on doing the basics rigorously:
 - **Strong benchmarks.** Models are compared with Diebold–Mariano tests.
 - **Calibrated prediction intervals.** Their real coverage is reported, not only the
   nominal one.
+- **Forecasts turned into orders.** A battery bids on the auction from the forecasts, and
+  the strategies are scored in euros, not only in MAE.
 
 **Key results** (51,246 out-of-sample hours, January 2021 to November 2026):
 
@@ -32,6 +34,10 @@ The project focuses on doing the basics rigorously:
   2021–2022, tree models broke down because prices rose far above anything in their
   training data.
 
+- **In euros, better forecasts are worth less than MAE suggests.** A 1 MW / 2 MWh battery
+  bidding from the forecasts captures 85% of its perfect-foresight profit with price-quantity
+  bid curves, against 80% when it simply trusts the naive forecast.
+
 ![MAE by year](reports/figures/mae_by_year.png)
 
 ---
@@ -41,6 +47,7 @@ The project focuses on doing the basics rigorously:
 - [The forecasting problem](#the-forecasting-problem)
 - [Method](#method)
 - [Results](#results)
+- [From forecasts to bids: a battery on the auction](#from-forecasts-to-bids-a-battery-on-the-auction)
 - [Quickstart](#quickstart)
 - [Project structure](#project-structure)
 - [Limitations and next steps](#limitations-and-next-steps)
@@ -165,6 +172,60 @@ The two notebooks go further:
   and hour, Diebold–Mariano tests, interval coverage by year, sample weeks, LightGBM
   feature importance.
 
+## From forecasts to bids: a battery on the auction
+
+A desk does not trade a forecast, it submits orders. `fr-power bid` replays the out-of-sample
+period as a small battery operator (1 MW / 2 MWh, 88% round-trip efficiency, empty at the
+start of each day) bidding on the day-ahead auction every day.
+
+**Why a forecast matters for bidding.** A small, flexible generator should simply offer at
+its marginal cost, whatever the forecast. A battery is different: the value of charging at
+13:00 depends on the price it will sell at in the evening, so its bids depend on the whole
+day's price shape.
+
+**Strategies** (`src/fr_power/bidding.py`):
+
+| Strategy | Orders submitted |
+|---|---|
+| `perfect_foresight` | Optimal schedule computed on the realized prices: the upper bound |
+| `schedule_<model>` | Optimal schedule on the model's point forecast, submitted as fixed quantities whatever the price |
+| `curves_ensemble` | One price-quantity curve per hour, optimized over 60 price scenarios: the ensemble forecast plus each of the previous 60 days' error vectors. A linear program maximizes the expected profit, with curves that are monotone in price (as SDAC orders must be) and a dispatch that is feasible in every scenario (Fleten & Pettersen, 2005) |
+
+**Settlement.** Each hour's executed volume is read on its curve at the cleared price. If
+the cleared prices fall outside the scenarios, the curves can commit the battery to sell
+energy it does not hold. It then delivers the closest feasible dispatch, and the gap is
+traded back at the day-ahead price plus a 50 €/MWh penalty (a proxy for the imbalance
+price). That dispatch only minimizes the gap, so the penalty can never be used to re-trade
+with hindsight.
+
+| Strategy | Profit (€/MW/year) | Share of perfect foresight | Cycles/day |
+|---|---:|---:|---:|
+| perfect_foresight | 78,900 | 100% | 1.85 |
+| schedule_naive | 62,800 | 79.6% | 1.84 |
+| schedule_lasso | 66,300 | 84.0% | 1.78 |
+| schedule_ensemble | 65,500 | 83.0% | 1.71 |
+| **curves_ensemble** | **67,000** | **85.0%** | 1.79 |
+
+2,082 delivery days (2021 to November 2026); per-year results are in
+`reports/bidding_by_year.csv`.
+
+**What this shows**
+
+1. **Forecast accuracy is worth less than its MAE gain.** The Lasso cuts the naive error by
+   16%, but adds only 4.4 points of captured profit. A battery needs the *ranking* of the
+   hours (cheap midday, expensive evening), and the naive forecast already gets that ranking
+   mostly right.
+2. **Bidding curves beat fixed quantities in every year.** Against the schedule built on the
+   same forecast, they earn 1,000 to 2,800 €/MW more per full year (450 in the partial year
+   2026). The gain comes from hours where the decision depends on the price: buy at night
+   only if the price is negative, or sell less in the morning if the price turns out low
+   (right panel below). On most hours the optimal curve is flat, and the battery trades the
+   same volume whatever the price.
+3. **The imbalance risk of curves is tiny.** Committed volumes the battery could not deliver
+   average 0.001 MWh/day.
+
+![Battery bidding backtest](reports/figures/bidding.png)
+
 ## Quickstart
 
 Requirements: Python 3.11+ and [uv](https://docs.astral.sh/uv/).
@@ -186,6 +247,7 @@ address. Once access is granted (usually within a few days), generate the token 
 uv run fr-power fetch      # download 2019 -> today to data/raw/ (~15 min, cached)
 uv run fr-power features   # build data/processed/feature_matrix.parquet
 uv run fr-power train      # walk-forward evaluation (~10 min) -> reports/
+uv run fr-power bid        # battery bidding backtest on the forecasts (~20 min)
 ```
 
 All settings (dates, lags, walk-forward schedule, hyperparameters, ensemble members) live in
@@ -201,7 +263,8 @@ src/fr_power/
 ├── features.py             point-in-time feature matrix
 ├── models.py               naive / lasso / LightGBM / Extra Trees, ensemble, walk-forward
 ├── evaluation.py           metrics, Diebold-Mariano tests, conformal intervals
-└── cli.py                  `fr-power fetch | features | train`
+├── bidding.py              battery bid curves (scenario LP), settlement, profit backtest
+└── cli.py                  `fr-power fetch | features | train | bid`
 tests/                      offline tests (all network calls mocked)
 notebooks/                  data exploration and forecast evaluation
 reports/                    metric tables and figures produced by `train`
@@ -230,6 +293,10 @@ uv run mypy src
 - **Simplified LEAR.** A full LEAR uses 24 hourly models and a variance-stabilizing
   transform (e.g. asinh) of prices.
 - **Untuned hyperparameters.** No search was run inside the walk-forward loop.
+- **A stylized battery.** It is a price-taker that only trades the day-ahead auction, with no
+  intraday re-optimization, ancillary services, degradation cost, cycle limit or exchange
+  fees, and it is empty at the start of every day. Real French batteries earn much of their
+  revenue from frequency reserves and run fewer cycles than 1.8 per day.
 
 ## License
 

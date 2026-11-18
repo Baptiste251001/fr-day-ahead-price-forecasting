@@ -50,10 +50,17 @@ def test_features_then_train(raw: dict[str, pd.DataFrame], config: Config, tmp_p
     for name in [*reports, "figures/mae_by_year.png", "figures/last_two_weeks.png"]:
         assert (config.reports_dir / name).exists(), name
 
+    result = runner.invoke(app, ["bid", "-c", str(config_path)])
+    assert result.exit_code == 0, result.output
+    summary = pd.read_csv(config.reports_dir / "bidding.csv", index_col="strategy")
+    assert summary.loc["perfect_foresight", "capture_vs_perfect"] == 1.0
+    assert (summary["capture_vs_perfect"] <= 1.0 + 1e-9).all()
+    assert (config.reports_dir / "figures" / "bidding.png").exists()
+
 
 def test_commands_fail_cleanly_without_inputs(config: Config, tmp_path: Path) -> None:
     config_path = _write_config(config, tmp_path)
-    for command in ["features", "train"]:
+    for command in ["features", "train", "bid"]:
         result = runner.invoke(app, [command, "-c", str(config_path)])
         assert result.exit_code == 1
         assert "ERROR" in result.output

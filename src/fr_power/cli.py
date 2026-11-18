@@ -1,4 +1,4 @@
-"""Command-line pipeline: `fr-power fetch`, then `fr-power features`, then `fr-power train`."""
+"""Command-line pipeline: `fr-power fetch`, `features`, `train`, then `bid`."""
 
 from __future__ import annotations
 
@@ -7,11 +7,12 @@ from pathlib import Path
 
 import matplotlib
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import typer
 
-from fr_power import data
-from fr_power.config import DEFAULT_CONFIG_PATH, Config, load_config
+from fr_power import bidding, data
+from fr_power.config import DEFAULT_CONFIG_PATH, BiddingConfig, Config, load_config
 from fr_power.evaluation import (
     conformal_intervals,
     dm_table,
@@ -103,6 +104,105 @@ def train(config: Path = ConfigOption) -> None:
     predictions = add_ensemble(predictions, cfg.models.ensemble)
     data.write_cache(predictions, cfg.data.processed_dir / PREDICTIONS_FILE)
     write_reports(matrix[TARGET], predictions, cfg.reports_dir)
+
+
+@app.command()
+def bid(config: Path = ConfigOption) -> None:
+    """Backtest day-ahead bidding for a battery on the walk-forward forecasts."""
+    cfg = _load(config)
+    matrix = data.read_cache(cfg.data.processed_dir / FEATURES_FILE)
+    predictions = data.read_cache(cfg.data.processed_dir / PREDICTIONS_FILE)
+    if matrix is None or predictions is None:
+        typer.echo("ERROR: no predictions found. Run `fr-power train` first.", err=True)
+        raise typer.Exit(1)
+    b = cfg.bidding
+    battery = bidding.Battery(b.power_mw, b.energy_mwh, b.round_trip_efficiency)
+    actual = matrix[TARGET]
+    daily = bidding.backtest(
+        actual,
+        predictions,
+        battery,
+        schedule_models=b.schedule_models,
+        curve_model=b.curve_model,
+        window_days=b.scenario_window_days,
+        min_days=b.scenario_min_days,
+        imbalance_penalty=b.imbalance_penalty_eur_mwh,
+    )
+    if daily.empty:
+        typer.echo("ERROR: no tradable day (forecasts or scenario history missing).", err=True)
+        raise typer.Exit(1)
+    summary = bidding.summarise(daily, battery)
+    yearly = bidding.profit_by_year(daily, battery)
+    reports = cfg.reports_dir
+    (reports / "figures").mkdir(parents=True, exist_ok=True)
+    summary.round(3).to_csv(reports / "bidding.csv", index_label="strategy")
+    yearly.round(0).to_csv(reports / "bidding_by_year.csv")
+
+    typer.echo(f"\nBattery bidding backtest ({summary.attrs['n_days']:,} delivery days):")
+    typer.echo(summary.round(3).to_string())
+    typer.echo("\nProfit by year (EUR per MW):")
+    typer.echo(yearly.round(0).to_string())
+    _bidding_figure(daily, actual, predictions[b.curve_model], battery, b, reports)
+    typer.echo(f"\n  reports written to {reports}/")
+
+
+def _bidding_figure(
+    daily: pd.DataFrame,
+    actual: pd.Series,
+    forecast: pd.Series,
+    battery: bidding.Battery,
+    b: BiddingConfig,
+    reports_dir: Path,
+) -> None:
+    """Cumulative profit by strategy, and example bid curves from the last 30 traded days.
+
+    The example is the day whose purchase and sale curves depend most on the price (on many
+    days the optimal curves are almost flat: the battery trades the same volume anyway).
+    """
+    matplotlib.use("Agg")
+    profit = daily.xs("profit_eur", axis=1, level="metric") / battery.power_mw / 1000
+    errors = bidding.error_table(actual, forecast)
+
+    def best_hours(quantities: np.ndarray) -> tuple[float, int, int]:
+        spread, mean_q = np.ptp(quantities, axis=1), quantities.mean(axis=1)
+        buy_spread, sell_spread = np.where(mean_q < 0, spread, 0), np.where(mean_q > 0, spread, 0)
+        score = float(buy_spread.max() + sell_spread.max())
+        return score, int(buy_spread.argmax()), int(sell_spread.argmax())
+
+    candidates = []
+    for ts in daily.index[-30:]:
+        day = ts.date()
+        day_forecast = forecast[forecast.index.date == day]
+        scenarios = bidding.scenarios_for_day(
+            day_forecast, errors, day, b.scenario_window_days, b.scenario_min_days
+        )
+        assert scenarios is not None  # the day was traded, so its scenarios exist
+        curves = bidding.optimal_curves(scenarios, battery)
+        candidates.append((best_hours(curves.quantities), day, day_forecast, curves))
+    (_, buy, sell), day, day_forecast, curves = max(candidates, key=lambda c: c[0][0])
+    realized = actual.reindex(day_forecast.index).to_numpy()
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.2), gridspec_kw={"width_ratios": [1.4, 1]})
+    for name in profit:
+        axes[0].plot(profit.index.to_numpy(), profit[name].cumsum().to_numpy(), label=name)
+    axes[0].set(ylabel="kEUR per MW", title="Cumulative day-ahead profit")
+    axes[0].legend(fontsize=8)
+    axes[1].axhline(0, color="grey", linewidth=0.6, zorder=0)
+    for h in dict.fromkeys([buy, sell]):
+        hour = day_forecast.index[h].hour
+        (line,) = axes[1].plot(
+            curves.prices[h], curves.quantities[h], marker=".", label=f"{hour:02d}:00"
+        )
+        axes[1].axvline(realized[h], color=line.get_color(), linestyle=":", linewidth=1)
+    axes[1].set(
+        xlabel="price (EUR/MWh)",
+        ylabel="net sale (MW), negative = purchase",
+        title=f"Bid curves for {day} (dotted: cleared price)",
+    )
+    axes[1].legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(reports_dir / "figures" / "bidding.png", dpi=120)
+    plt.close(fig)
 
 
 def write_reports(actual: pd.Series, predictions: pd.DataFrame, reports_dir: Path) -> None:

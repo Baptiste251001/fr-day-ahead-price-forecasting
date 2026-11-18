@@ -98,6 +98,19 @@ class ModelsConfig(BaseModel):
     ensemble: list[str] = ["lasso", "lightgbm", "extra_trees"]
 
 
+class BiddingConfig(BaseModel):
+    """Battery and settlement assumptions for the bidding backtest (`fr-power bid`)."""
+
+    power_mw: float = Field(default=1.0, gt=0)
+    energy_mwh: float = Field(default=2.0, gt=0)
+    round_trip_efficiency: float = Field(default=0.88, gt=0, le=1)
+    schedule_models: list[str] = ["naive", "lasso", "ensemble"]
+    curve_model: str = "ensemble"
+    scenario_window_days: int = Field(default=60, gt=0)
+    scenario_min_days: int = Field(default=20, gt=0)
+    imbalance_penalty_eur_mwh: float = Field(default=50.0, ge=0)
+
+
 class Config(BaseModel):
     random_seed: int = 42
     reports_dir: Path = Path("reports")
@@ -105,6 +118,7 @@ class Config(BaseModel):
     features: FeaturesConfig = FeaturesConfig()
     walk_forward: WalkForwardConfig
     models: ModelsConfig
+    bidding: BiddingConfig = BiddingConfig()
 
 
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:

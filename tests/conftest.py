@@ -88,5 +88,6 @@ def config(tmp_path) -> Config:  # type: ignore[no-untyped-def]
                 },
                 "extra_trees": {"n_estimators": 20, "min_samples_leaf": 5, "max_features": 0.5},
             },
+            "bidding": {"scenario_window_days": 10, "scenario_min_days": 5},
         }
     )
