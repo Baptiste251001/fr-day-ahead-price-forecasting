@@ -49,14 +49,6 @@ def make_raw(days: int = 60, seed: int = 0) -> dict[str, pd.DataFrame]:
             {"temperature_c": temperature, "hdd": 15.5 - temperature, "cdd": 0.0},
             index=days_index,
         ),
-        data.WEATHER_FORECAST: pd.DataFrame(
-            {
-                "nwp_temperature_c": 8 + rng.normal(0, 3, n),
-                "nwp_wind_speed_100m_kmh": 20 + rng.normal(0, 5, n),
-                "nwp_solar_radiation_wm2": solar / 20,
-            },
-            index=hourly,
-        ),
         data.GAS: gas,
     }
 
@@ -81,10 +73,6 @@ def config(tmp_path) -> Config:  # type: ignore[no-untyped-def]
                     "hdd_base_celsius": 15.5,
                     "cdd_base_celsius": 18.0,
                 },
-                "weather_forecast": {
-                    "wind_points": [{"name": "W", "lat": 50.0, "lon": 3.0, "weight": 1.0}],
-                    "solar_points": [{"name": "S", "lat": 44.0, "lon": 0.0, "weight": 1.0}],
-                },
             },
             "walk_forward": {"initial_train_days": 30, "retrain_every_days": 10},
             "models": {
@@ -98,6 +86,7 @@ def config(tmp_path) -> Config:  # type: ignore[no-untyped-def]
                     "colsample_bytree": 0.8,
                     "early_stopping_rounds": 10,
                 },
+                "extra_trees": {"n_estimators": 20, "min_samples_leaf": 5, "max_features": 0.5},
             },
         }
     )

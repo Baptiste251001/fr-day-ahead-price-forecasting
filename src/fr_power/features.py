@@ -17,10 +17,7 @@ day-ahead auction gate closure (12:00 CET). At that moment we know:
   same hour two days earlier: a persistence proxy for nuclear/hydro availability and weather;
 * the TTF gas close of D-2 or earlier (D-1's close comes after the gate), turned into the
   fuel cost of a gas plant, `TTF / efficiency` -- the marginal-cost anchor of the price;
-* calendar information (hour, weekday, month, French public holidays);
-* optionally (`weather_forecasts`), archived NWP forecasts for day D issued two days ahead.
-  The archive only holds wind and solar forecasts from early 2024, hence a separate
-  experiment (`configs/nwp.yaml`).
+* calendar information (hour, weekday, month, French public holidays).
 
 ENTSO-E data moved from hourly to 15-minute resolution for several series (EU 15-minute
 market time unit), so every input is first averaged onto an hourly grid.
@@ -41,7 +38,6 @@ from fr_power.data import (
     LOAD_FORECAST,
     TIMEZONE,
     WEATHER,
-    WEATHER_FORECAST,
     WIND_SOLAR_FORECAST,
 )
 
@@ -148,8 +144,6 @@ def build_feature_matrix(raw: dict[str, pd.DataFrame], config: FeaturesConfig) -
         generation,
         weather,
     ]
-    if config.weather_forecasts:
-        frames.append(to_hourly(raw[WEATHER_FORECAST]).reindex(grid))
     return pd.concat([*frames, price.rename(TARGET)], axis=1)
 
 

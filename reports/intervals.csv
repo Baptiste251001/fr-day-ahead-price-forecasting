@@ -1,0 +1,6 @@
+model,coverage,mean_width,interval_score,n_hours
+naive,0.869,132.957,210.771,51014.0
+lasso,0.874,101.01,155.96,50766.0
+lightgbm,0.851,137.761,207.039,51019.0
+extra_trees,0.866,106.96,164.625,51019.0
+ensemble,0.867,104.529,161.416,50766.0

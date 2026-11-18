@@ -17,6 +17,9 @@ data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 
+# Papers and other local reference documents
+*.pdf
+
 # Tooling caches
 .ipynb_checkpoints/
 .pytest_cache/

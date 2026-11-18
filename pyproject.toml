@@ -5,6 +5,12 @@ description = "Walk-forward forecasting of French day-ahead electricity prices f
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+keywords = ["electricity price forecasting", "day-ahead market", "energy", "ENTSO-E", "France"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering",
+]
 authors = [{ name = "Baptiste Malard" }]
 
 dependencies = [
@@ -39,6 +45,9 @@ notebooks = [
     "jupyterlab>=4.1,<5.0",
     "ipykernel>=6.29,<7.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/Baptiste251001/fr-day-ahead-price-forecasting"
 
 [project.scripts]
 fr-power = "fr_power.cli:app"

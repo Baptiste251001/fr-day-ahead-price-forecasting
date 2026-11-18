@@ -9,6 +9,9 @@ Every model exposes `fit(X, y)` / `predict(X) -> pd.Series`:
   the shared feature set, rather than LEAR's 24 separate hourly models.
 * `LightGBMForecaster` -- gradient-boosted trees, early-stopped on the most recent 10% of
   the training window (never a random split).
+* `ExtraTreesForecaster` -- extremely randomized trees, a robust benchmark.
+
+`add_ensemble` combines models by their hour-by-hour median.
 """
 
 from __future__ import annotations
@@ -20,12 +23,13 @@ from typing import Protocol
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import ExtraTreesRegressor
 from sklearn.linear_model import LassoCV
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from fr_power.config import Config, LassoConfig, LightGBMConfig
+from fr_power.config import Config, ExtraTreesConfig, LassoConfig, LightGBMConfig
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +104,7 @@ class LightGBMForecaster:
             force_row_wise=True,
             verbosity=-1,
         )
-        n_val = max(1, len(X) // 10)
+        n_val = max(1, len(X) // 10)  # early stopping on the most recent 10%
         self.model_.fit(
             X.iloc[:-n_val],
             y.iloc[:-n_val],
@@ -115,14 +119,45 @@ class LightGBMForecaster:
         return pd.Series(self.model_.predict(X), index=X.index, name="prediction")
 
 
+class ExtraTreesForecaster:
+    def __init__(self, config: ExtraTreesConfig, random_seed: int = 42) -> None:
+        self.config = config
+        self.random_seed = random_seed
+        self.model_: ExtraTreesRegressor | None = None
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> None:
+        c = self.config
+        self.model_ = ExtraTreesRegressor(
+            n_estimators=c.n_estimators,
+            min_samples_leaf=c.min_samples_leaf,
+            max_features=c.max_features,
+            n_jobs=-1,
+            random_state=self.random_seed,
+        )
+        self.model_.fit(X[y.notna()], y[y.notna()])
+
+    def predict(self, X: pd.DataFrame) -> pd.Series:
+        if self.model_ is None:
+            raise RuntimeError("fit() must be called before predict()")
+        return pd.Series(self.model_.predict(X), index=X.index, name="prediction")
+
+
 def build_models(cfg: Config) -> dict[str, Callable[[], Forecaster]]:
     """Fresh-model factories, one per model name, configured from `cfg`."""
-    seed = cfg.random_seed
+    m, seed = cfg.models, cfg.random_seed
     return {
         "naive": NaiveForecaster,
-        "lasso": lambda: LassoForecaster(cfg.models.lasso, seed),
-        "lightgbm": lambda: LightGBMForecaster(cfg.models.lightgbm, seed),
+        "lasso": lambda: LassoForecaster(m.lasso, seed),
+        "lightgbm": lambda: LightGBMForecaster(m.lightgbm, seed),
+        "extra_trees": lambda: ExtraTreesForecaster(m.extra_trees, seed),
     }
+
+
+def add_ensemble(predictions: pd.DataFrame, members: list[str]) -> pd.DataFrame:
+    """Append the hour-by-hour median of `members` as an `ensemble` column."""
+    out = predictions.copy()
+    out["ensemble"] = predictions[members].median(axis=1, skipna=False)
+    return out
 
 
 def walk_forward_predict(

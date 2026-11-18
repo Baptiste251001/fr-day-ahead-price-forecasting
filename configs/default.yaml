@@ -23,27 +23,6 @@ data:
       - { name: Strasbourg, lat: 48.5734, lon:  7.7521, weight: 0.08 }
     hdd_base_celsius: 15.5
     cdd_base_celsius: 18.0
-  weather_forecast:
-    # Archived NWP forecasts issued 2 days ahead (runs of D-1 may finish after the gate).
-    # Temperature reuses the population-weighted cities above. Weights below are rough
-    # regional shares of installed capacity (wind: north and east; solar: south).
-    lead_days: 2
-    wind_points:
-      - { name: Hauts-de-France,    lat: 49.90, lon:  2.80, weight: 0.27 }
-      - { name: Grand-Est,          lat: 48.90, lon:  4.40, weight: 0.24 }
-      - { name: Occitanie,          lat: 43.30, lon:  2.90, weight: 0.10 }
-      - { name: Centre-Val-de-Loire, lat: 47.80, lon: 1.60, weight: 0.09 }
-      - { name: Nouvelle-Aquitaine, lat: 46.30, lon:  0.30, weight: 0.10 }
-      - { name: Bretagne,           lat: 48.30, lon: -2.80, weight: 0.08 }
-      - { name: Offshore-Atlantic,  lat: 47.15, lon: -2.60, weight: 0.12 }
-    solar_points:
-      - { name: Nouvelle-Aquitaine, lat: 44.40, lon: -0.40, weight: 0.27 }
-      - { name: Occitanie,          lat: 43.70, lon:  2.50, weight: 0.24 }
-      - { name: PACA,               lat: 43.60, lon:  5.60, weight: 0.13 }
-      - { name: Auvergne-Rhone-Alpes, lat: 45.10, lon: 4.90, weight: 0.12 }
-      - { name: Grand-Est,          lat: 48.60, lon:  6.00, weight: 0.08 }
-      - { name: Pays-de-la-Loire,   lat: 47.30, lon: -1.20, weight: 0.08 }
-      - { name: Centre-Val-de-Loire, lat: 47.40, lon: 1.70, weight: 0.08 }
   gas_ticker: "TTF=F"            # Yahoo Finance: Dutch TTF gas front month, EUR/MWh
 
 features:
@@ -51,13 +30,13 @@ features:
   price_rolling_windows_hours: [24, 168]
   realized_lag_hours: 48                # lag for realized generation and weather (>= 48)
   gas_plant_efficiency: 0.52            # gas cost of power = TTF / efficiency (EUR/MWh)
-  weather_forecasts: false              # NWP features: archive only from 2024 (configs/nwp.yaml)
 
 walk_forward:
   initial_train_days: 730   # two years of history before the first out-of-sample day
   retrain_every_days: 30    # refit every month, predict the following month
 
 models:
+  ensemble: [lasso, lightgbm, extra_trees]   # hour-by-hour median of these models
   lasso:
     alpha_grid: [0.001, 0.01, 0.1, 1.0]
     cv_folds: 5
@@ -69,3 +48,7 @@ models:
     subsample: 0.8
     colsample_bytree: 0.8
     early_stopping_rounds: 50
+  extra_trees:
+    n_estimators: 100
+    min_samples_leaf: 10
+    max_features: 0.5

@@ -72,3 +72,41 @@ def dm_table(actual: pd.Series, predictions: pd.DataFrame) -> pd.DataFrame:
         stat, p = diebold_mariano(df["actual"], df[a], df[b])
         rows.append({"model_a": a, "model_b": b, "dm_stat": stat, "p_value": p})
     return pd.DataFrame(rows)
+
+
+def conformal_intervals(
+    actual: pd.Series,
+    forecast: pd.Series,
+    coverage: float = 0.9,
+    window_days: int = 60,
+    min_days: int = 20,
+) -> pd.DataFrame:
+    """Rolling split-conformal prediction intervals around a point forecast.
+
+    For each delivery hour, the half-width is the `coverage` quantile of that hour's absolute
+    errors over the previous `window_days` days. Day D's interval only uses errors of days up
+    to D-1, all known at decision time (D-1's prices are published on D-2). Returns columns
+    `lower` and `upper`, NaN until `min_days` days of errors are available.
+    """
+    errors = (actual - forecast).abs().dropna()
+    table = errors.groupby([errors.index.date, errors.index.hour]).mean().unstack()
+    half_width = table.rolling(window_days, min_periods=min_days).quantile(coverage).shift(1)
+    keys = pd.MultiIndex.from_arrays([forecast.index.date, forecast.index.hour])
+    width = half_width.stack().reindex(keys).to_numpy()
+    return pd.DataFrame(
+        {"lower": forecast - width, "upper": forecast + width}, index=forecast.index
+    )
+
+
+def interval_metrics(actual: pd.Series, intervals: pd.DataFrame, coverage: float = 0.9) -> dict:
+    """Empirical coverage, mean width and interval (Winkler) score; lower score is better."""
+    df = pd.concat([actual.rename("y"), intervals], axis=1).dropna()
+    y, lo, hi = df["y"], df["lower"], df["upper"]
+    alpha = 1 - coverage
+    score = (hi - lo) + 2 / alpha * ((lo - y).clip(lower=0) + (y - hi).clip(lower=0))
+    return {
+        "coverage": float(((y >= lo) & (y <= hi)).mean()),
+        "mean_width": float((hi - lo).mean()),
+        "interval_score": float(score.mean()),
+        "n_hours": len(df),
+    }

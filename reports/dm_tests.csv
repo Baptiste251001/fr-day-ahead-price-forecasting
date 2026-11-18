@@ -1,4 +1,11 @@
 model_a,model_b,dm_stat,p_value
-naive,lasso,13.5371,0.0
-naive,lightgbm,-3.5205,0.0004
-lasso,lightgbm,-12.8387,0.0
+naive,lasso,10.1435,0.0
+naive,lightgbm,-7.1473,0.0
+naive,extra_trees,5.6433,0.0
+naive,ensemble,7.1334,0.0
+lasso,lightgbm,-14.5991,0.0
+lasso,extra_trees,-5.2177,0.0
+lasso,ensemble,-3.3415,0.0008
+lightgbm,extra_trees,14.4374,0.0
+lightgbm,ensemble,16.2537,0.0
+extra_trees,ensemble,6.1275,0.0

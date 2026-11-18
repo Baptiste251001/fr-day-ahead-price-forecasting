@@ -7,9 +7,21 @@ import pandas as pd
 import pytest
 
 from fr_power.config import Config
-from fr_power.evaluation import diebold_mariano, dm_table, mae_by_year, point_metrics
+from fr_power.evaluation import (
+    conformal_intervals,
+    diebold_mariano,
+    dm_table,
+    interval_metrics,
+    mae_by_year,
+    point_metrics,
+)
 from fr_power.features import TARGET, build_feature_matrix, feature_columns
-from fr_power.models import NaiveForecaster, build_models, walk_forward_predict
+from fr_power.models import (
+    NaiveForecaster,
+    add_ensemble,
+    build_models,
+    walk_forward_predict,
+)
 
 
 @pytest.fixture
@@ -101,3 +113,32 @@ def test_walk_forward_folds_stay_on_midnight_across_dst() -> None:
     first_predicted = preds["naive"].notna().groupby(preds.index.date).first()
     assert first_predicted.loc[pd.Timestamp("2024-04-01").date()]  # a fold start after DST
     assert preds["naive"].notna().groupby(preds.index.date).nunique().eq(1).all()  # whole days
+
+
+def test_ensemble_is_the_hourly_median() -> None:
+    preds = pd.DataFrame({"a": [1.0, 5.0], "b": [2.0, np.nan], "c": [10.0, 1.0], "naive": 0.0})
+    out = add_ensemble(preds, ["a", "b", "c"])
+    assert out["ensemble"].iloc[0] == 2.0
+    assert np.isnan(out["ensemble"].iloc[1])  # a member without a forecast -> no ensemble
+
+
+def test_conformal_intervals_use_only_past_days_and_reach_coverage() -> None:
+    rng = np.random.default_rng(1)
+    idx = pd.date_range("2024-01-01", periods=24 * 200, freq="h", tz="Europe/Paris")
+    forecast = pd.Series(50.0, index=idx)
+    actual = forecast + rng.normal(0, 10, len(idx))
+
+    intervals = conformal_intervals(actual, forecast, coverage=0.9, window_days=60)
+    assert intervals.iloc[: 24 * 20].isna().all().all()  # not enough history yet
+
+    # Changing day D's outcome must not change day D's interval.
+    day = idx[24 * 100 : 24 * 101]
+    shocked = actual.copy()
+    shocked[day] += 1_000
+    pd.testing.assert_frame_equal(
+        intervals.loc[day], conformal_intervals(shocked, forecast, 0.9, 60).loc[day]
+    )
+
+    metrics = interval_metrics(actual, intervals, coverage=0.9)
+    assert 0.86 < metrics["coverage"] < 0.94
+    assert metrics["mean_width"] == pytest.approx(2 * 1.645 * 10, rel=0.1)

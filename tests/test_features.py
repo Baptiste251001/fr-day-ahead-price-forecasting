@@ -62,13 +62,6 @@ def test_gas_price_uses_closes_of_d_minus_2_or_earlier(raw: dict[str, pd.DataFra
     assert (before.loc[DAY : DAY + pd.Timedelta(hours=23), "gas_cost_eur_mwh"] == expected).all()
 
 
-def test_weather_forecast_features_are_optional(raw: dict[str, pd.DataFrame]) -> None:
-    without = build_feature_matrix(raw, CONFIG)
-    with_nwp = build_feature_matrix(raw, FeaturesConfig(weather_forecasts=True))
-    assert not any(c.startswith("nwp_") for c in without.columns)
-    assert {"nwp_temperature_c", "nwp_wind_speed_100m_kmh"} <= set(with_nwp.columns)
-
-
 @pytest.mark.parametrize("dataset", [data.GENERATION, data.WEATHER])
 def test_realized_data_from_d_minus_1_is_not_used(
     raw: dict[str, pd.DataFrame], dataset: str

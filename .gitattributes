@@ -1,0 +1,4 @@
+# Normalise line endings in the repository; binary files are left untouched.
+* text=auto eol=lf
+*.png binary
+*.parquet binary
